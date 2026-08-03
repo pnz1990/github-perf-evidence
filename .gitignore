@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+
+# Working output -- may contain real names and activity data. Never commit.
+roster.json
+filecache.json
+commitcache.json
+patterns.json
+audit-report.txt
+*-evidence.yaml
+COHORT-INDEX.yaml

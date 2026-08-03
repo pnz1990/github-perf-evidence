@@ -1,0 +1,35 @@
+{
+  "_comment": [
+    "Copy this, fill in your people, pass via --roster.",
+    "Only github_login is required. 'id' defaults to the login and is used as",
+    "the output filename key -- set it to your internal alias if you have one.",
+    "identity_evidence is strongly recommended: a login is not a person, and a",
+    "missing value is marked UNDOCUMENTED in the output."
+  ],
+  "window": {"start": "2026-01-01", "end": "2026-08-03"},
+  "people": [
+    {
+      "github_login": "octocat",
+      "id": "ocat",
+      "name": "Octo Cat",
+      "team": "Platform",
+      "level": "mid",
+      "title": "Software Engineer",
+      "manager": "mgr-alias",
+      "identity_evidence": "Internal directory lists GitHub handle 'octocat' for ocat. Directly documented."
+    },
+    {
+      "github_login": "some-login",
+      "id": "sperson",
+      "name": "Sam Person",
+      "team": "Platform",
+      "level": "senior",
+      "identity_evidence": "Profile name + company match only; no explicit mapping doc found. MEDIUM confidence."
+    },
+    {
+      "github_login": "nameless-handle",
+      "id": "nhandle",
+      "identity_evidence": "NO name field on the GitHub profile. Mapped by login-pattern resemblance to the internal alias plus activity overlap with their team's repos. This is INFERENCE -- confirm with the person before using this file in a review."
+    }
+  ]
+}
