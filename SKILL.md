@@ -174,7 +174,7 @@ than the individual.
 ## Tests
 
 ```bash
-python3 tests/test_pipeline.py     # 157 assertions, offline, no gh needed
+python3 tests/test_pipeline.py     # 163 assertions, offline, no gh needed
 ```
 
 Point downstream consumers at `COHORT-INDEX.yaml` first.

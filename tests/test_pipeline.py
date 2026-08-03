@@ -515,6 +515,37 @@ def test_trend_windows_do_not_overlap():
            - __import__("datetime").date(*map(int, early_end.split("-")))).days == 1)
 
 
+def test_ownership_timeout_is_bounded():
+    """A hot directory in a large monorepo can paginate for minutes. An unbounded
+    call makes the script look hung, so timeouts must be caught and reported."""
+    print("\n[ownership] per-directory calls are bounded")
+    sys.path.insert(0, SCRIPTS)
+    import ownership                          # noqa: E402
+    real = ownership.subprocess.run
+    try:
+        def boom(*a, **k):
+            raise ownership.subprocess.TimeoutExpired(cmd="gh", timeout=1)
+        ownership.subprocess.run = boom
+        eq("timeout returns None (distinct from empty)",
+           ownership.gh_lines(["api", "x"], timeout=1), None)
+    finally:
+        ownership.subprocess.run = real
+
+    class R:
+        returncode, stdout = 1, ""
+    try:
+        ownership.subprocess.run = lambda *a, **k: R()
+        eq("api failure returns empty list, not None",
+           ownership.gh_lines(["api", "x"]), [])
+    finally:
+        ownership.subprocess.run = real
+
+    eq("dir_of depth 1", ownership.dir_of("pkg/api/types.go", 1), "pkg")
+    eq("dir_of depth 2", ownership.dir_of("pkg/api/types.go", 2), "pkg/api")
+    eq("dir_of top-level file", ownership.dir_of("main.go", 2), "(repo root)")
+    check("ownership filters bots", bool(ownership.BOT_RE.search("ci-bot")))
+
+
 def test_no_variable_shadowing_regression():
     """A real bug: `ext` (a list of PRs) was reassigned to a file-extension
     string inside the language loop, so the external-contributions section
@@ -584,7 +615,7 @@ def main():
     print("=" * 70)
     for t in (test_classification, test_bot_filter,
               test_stale_pipeline_guard, test_review_depth_keys_match_report,
-              test_trend_windows_do_not_overlap,
+              test_trend_windows_do_not_overlap, test_ownership_timeout_is_bounded,
               test_gh_json_type_enforcement, test_repo_meta_degrades,
               test_wrap_never_splits_words, test_yq_escaping,
               test_html_escaping, test_bar_bounds,

@@ -36,8 +36,14 @@ BOT_RE = re.compile(
     r"|^(dependabot|renovate|copilot|github-actions|web-flow)", re.I)
 
 
-def gh_lines(args):
-    r = subprocess.run(["gh"] + args, capture_output=True, text=True)
+def gh_lines(args, timeout=25):
+    """One gh call, bounded. A hot directory in a large monorepo can paginate for
+    a long time; an unbounded call makes the whole script look hung."""
+    try:
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True,
+                           timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return None
     return r.stdout.strip().splitlines() if r.returncode == 0 else []
 
 
@@ -60,6 +66,10 @@ def main():
                     help="cap subsystems analyzed; largest kept (default 40)")
     ap.add_argument("--since", help="YYYY-MM-DD for commit history (defaults to "
                                     "the roster window start)")
+    ap.add_argument("--timeout", type=int, default=25,
+                    help="per-directory API timeout in seconds (default 25). "
+                         "Hot directories in large monorepos can paginate for a "
+                         "long time; those are skipped and reported.")
     a = ap.parse_args()
 
     pat, _ = load_patterns(a.outdir)
@@ -95,13 +105,22 @@ def main():
           % (len(targets), window_start or "repo start"), file=sys.stderr)
 
     subsystems = []
+    timeouts = []
     for i, ((repo, d), lines) in enumerate(targets, 1):
+        print("  [%d/%d] %s %s" % (i, len(targets), repo, d), file=sys.stderr)
         args = ["api", "--paginate",
                 "repos/%s/commits?per_page=100&path=%s" % (repo, d)]
         if window_start:
             args[-1] += "&since=%sT00:00:00Z" % window_start
+        lines = gh_lines(args + ["--jq", '.[]|.author.login//"unknown"'],
+                         timeout=a.timeout)
+        if lines is None:
+            print("      timed out after %ds -- skipped (raise --timeout)"
+                  % a.timeout, file=sys.stderr)
+            timeouts.append("%s/%s" % (repo, d))
+            continue
         authors = Counter()
-        for line in gh_lines(args + ["--jq", '.[]|.author.login//"unknown"']):
+        for line in lines:
             if line and not BOT_RE.search(line):
                 authors[line] += 1
         if not authors:
@@ -129,8 +148,6 @@ def main():
                         authors.most_common(8)],
             "top_author_in_cohort": top in cohort,
         })
-        if i % 10 == 0:
-            print("  %d/%d" % (i, len(targets)), file=sys.stderr)
 
     # Per-person: subsystems where they are the dominant author.
     per_person = defaultdict(list)
@@ -159,6 +176,7 @@ def main():
             "it will not appear. Directory boundaries are a proxy for "
             "subsystem boundaries and are sometimes wrong. Treat as a "
             "conversation starter, not an ownership ruling."),
+        "skipped_timeouts": timeouts,
         "bus_factor_risk": risk,
         "by_person": dict(per_person),
         "subsystems": subsystems,
@@ -167,6 +185,9 @@ def main():
     json.dump(out, open(path, "w"), indent=1)
 
     print("\nwrote %s" % path)
+    if timeouts:
+        print("SKIPPED %d subsystem(s) on timeout: %s"
+              % (len(timeouts), ", ".join(timeouts[:5])), file=sys.stderr)
     if risk:
         print("\nBUS-FACTOR RISK -- one person is >=50% of commits:")
         for s in risk[:12]:
