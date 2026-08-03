@@ -123,7 +123,7 @@ def test_bot_filter():
     print("\n[discover] bot detection")
     # `<project>-bot` is the case that shipped broken: a release bot authored
     # 9 of 14 PRs in a real window and would have topped the roster.
-    for lg in ("eksctl-bot", "dependabot[bot]", "renovate[bot]",
+    for lg in ("someproject-bot", "dependabot[bot]", "renovate[bot]",
                "github-actions[bot]", "k8s-ci-robot", "openshift-ci-robot",
                "my-bot", "bot-runner", "snyk-bot", "release_bot", "ci-bot2",
                "web-flow", "copilot"):

@@ -20,8 +20,8 @@ from collections import Counter
 # Bot detection. The trailing/leading -bot and bot- forms matter: project-specific
 # service accounts (release bots, CI bots) are named like `<project>-bot` and are
 # NOT covered by the `[bot]` suffix convention. Verified against a real org where
-# `eksctl-bot` authored 9 of 14 PRs in the window and would otherwise have been
-# reported as the most productive "person" on the team.
+# a `<project>-bot` release account authored 9 of 14 PRs in the window and would
+# otherwise have been reported as the most productive "person" on the team.
 BOT_RE = re.compile(
     r"\[bot\]$"
     r"|(^|[-_])bot([-_]|$)"
