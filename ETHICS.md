@@ -17,6 +17,14 @@ talked three people out of a bad architecture in a hallway.
 For most teams, public GitHub is a **minority** of an engineer's contribution.
 For teams working on private repos it may be nearly none of it.
 
+## The one section about the team, not individuals
+
+`ownership.py` reports bus-factor risk: subsystems where one person wrote most of
+the commits. That is a **staffing finding**. It tells you where to pair someone
+in or spread the next project. It is not a credit to award and not a problem to
+raise with the person who happens to be the sole author. If you use it to praise
+or criticize an individual you have inverted its purpose.
+
 ## Rules of use
 
 1. **Never rank people by line count.** Volume rankings order activity, not
@@ -36,6 +44,15 @@ For teams working on private repos it may be nearly none of it.
    without their knowledge is surveillance, not management. Most engineers are
    glad to have their work found; nobody likes discovering it was measured
    behind their back.
+7. **Review depth is not a productivity target.** `inline_comments_per_pr`
+   exists to stop a rubber stamp counting the same as a real review. Announcing
+   it as a goal turns it into a comment-padding contest and makes reviews worse.
+8. **Trajectory is not a verdict.** A declining half can mean parental leave, an
+   on-call rotation, a long incident, or one big project landing on the other
+   side of the split. Know the context before reading the arrow.
+9. **Private-repo output is confidential.** `--visibility all` puts private repo
+   names and PR titles on your disk. The `.gitignore` keeps them out of git;
+   keeping them out of Slack is on you.
 
 ## Not for
 

@@ -23,7 +23,8 @@ import subprocess
 import sys
 
 # Working files, not person bundles.
-SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json")
+SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json",
+              "reviewcache.json", "ownercache.json")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from classify import build_bucket, load_patterns  # noqa: E402

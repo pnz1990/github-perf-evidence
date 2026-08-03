@@ -49,12 +49,28 @@ OUT=/tmp/perf_evidence          # working dir; anything writable
 python3 $S/discover.py  --org myorg --days 180 -o roster.json
 #    then EDIT roster.json: drop non-team-members, fill identity_evidence
 
-python3 $S/fetch.py     --roster roster.json --outdir $OUT
-python3 $S/cache.py     --outdir $OUT --commits          # file lists + commit subjects
+python3 $S/fetch.py     --roster roster.json --outdir $OUT --compare-window
+python3 $S/cache.py     --outdir $OUT --all              # files + commits + review depth
 python3 $S/classify.py  --outdir $OUT --profile kubernetes web   # see --list-profiles
 python3 $S/audit.py     --outdir $OUT                    # ← REVIEW OUTPUT, then loop
+python3 $S/ownership.py --outdir $OUT                    # de-facto owners + bus factor
 python3 $S/build.py     --outdir $OUT --roster roster.json --own-orgs myorg
+python3 $S/report.py    --outdir $OUT --open             # interactive HTML
 ```
+
+**Order matters.** `fetch.py` rewrites the bundles, which clears
+classification, so any re-fetch means re-running `classify.py` before
+`build.py`. `build.py` fails with instructions if you forget.
+
+Useful flags:
+
+| | |
+|---|---|
+| `fetch.py --dry-run` | estimate API calls before committing to a scan |
+| `fetch.py --visibility all` | include private repos (needs `repo` scope). Output becomes CONFIDENTIAL. |
+| `fetch.py --compare-window` | also scan two half-windows to show trajectory |
+| `cache.py --review-depth` | inline comments + verdicts per review (2 calls/PR) |
+| `report.py --open` | write the HTML and open it |
 
 `discover.py` finds who was active so you do not have to know every login.
 It filters bots and leaves `identity_evidence` blank on purpose: it proves a
@@ -127,11 +143,39 @@ $OUT/
   commitcache.json          # per-PR commit subjects (with --commits)
 ```
 
-Each person file carries: `summary`, `ownership_roles`,
-`external_upstream_contributions`, `fork_activity`, `collaboration` (discussion
-on others' work), `language_mix`, `delivery` (cycle time, test share),
+Every file is written twice: `.yaml` for humans and diffs, `.json` for tools.
+`report.py` reads the JSON, so no YAML parser is needed anywhere.
+
+Each person file carries: `summary`, `ownership_roles`, **`review_depth`**,
+**`trajectory`**, **`de_facto_ownership`**, `external_upstream_contributions`,
+`fork_activity`, `collaboration`, `language_mix`, `delivery`,
 `authored_commit_subjects`, `cadence`, `by_repo`, `reviews`,
-`largest_hand_authored`, `open_and_wip`, `issues_opened`, and `entries`.
+`largest_hand_authored`, `open_and_wip`, `issues_opened`, `entries`.
+
+`report.html` is a single self-contained file: no server, no network, no build
+step. Tabs for the cohort, rankings, team risk, and each person. Sortable
+tables, searchable commit subjects, caveats rendered as visible banners.
+
+## Review depth beats review count
+
+`reviews_given` counts PRs. Measured on real data, one reviewer had **52 review
+events and 11 inline comments** while another had **9 events and 50 inline
+comments** — a count-only metric ranks the first 5.8x higher while the second
+was doing the deeper work. Cite `inline_comments_per_reviewed_pr` when you mean
+depth.
+
+## Bus factor is a team finding
+
+`ownership.py` also reports subsystems where one person wrote most of the
+commits. That is a staffing risk you own, not a credit to award or a problem to
+raise with the person. It is the one output here that is about the team rather
+than the individual.
+
+## Tests
+
+```bash
+python3 tests/test_pipeline.py     # 157 assertions, offline, no gh needed
+```
 
 Point downstream consumers at `COHORT-INDEX.yaml` first.
 

@@ -20,7 +20,8 @@ import re
 import sys
 
 # Working files, not person bundles.
-SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json")
+SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json",
+              "reviewcache.json", "ownercache.json")
 
 # The seed is deliberately CONSERVATIVE. A rule that wrongly marks authored work
 # as generated deletes someone's contribution from their review -- the one error

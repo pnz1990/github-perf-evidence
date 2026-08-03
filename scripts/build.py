@@ -17,7 +17,8 @@ import sys
 from collections import Counter, defaultdict
 
 # Working files, not person bundles.
-SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json")
+SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json",
+              "reviewcache.json", "ownercache.json")
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from classify import build_bucket, load_patterns  # noqa: E402
@@ -115,7 +116,8 @@ def ownership(login, repos, memo):
     return roles
 
 
-def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
+def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None,
+                 rcache=None, owners=None):
     b = json.load(open(path))
     P, PRS = b["person"], b["prs"]
     REVIEWS, ISSUES = b["reviews"], b["issues"]
@@ -128,6 +130,19 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
     if not PRS:
         print("SKIP %s -- no PRs in window" % login)
         return None
+
+    # Re-running fetch.py overwrites the bundle and drops classification, so a
+    # stale pipeline order otherwise dies with a bare KeyError far from the
+    # cause. Fail here with the fix instead.
+    unclassified = [p for p in PRS if "hand_additions" not in p]
+    if unclassified:
+        raise SystemExit(
+            "%s: %d of %d PRs are unclassified.\n"
+            "  fetch.py rewrote the bundle, which clears classification.\n"
+            "  Run:  python3 classify.py --outdir <outdir>\n"
+            "  then: python3 audit.py --outdir <outdir>\n"
+            "  and re-run build.py."
+            % (login, len(unclassified), len(PRS)))
 
     for p in PRS:
         m = repo_meta(p["repo"], rmeta)
@@ -243,6 +258,48 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
             else:
                 impl_lines += add
 
+    # Review DEPTH. Count alone treats a rubber stamp and a 30-comment design
+    # argument identically; measured on real data one reviewer had 52 events /
+    # 11 inline comments while another had 9 events / 50 inline comments.
+    rd = None
+    if rcache:
+        ev = inline = inline_chars = body_chars = stamps = 0
+        approvals = changes = commented = 0
+        prs_touched = 0
+        for r in REVIEWS:
+            e = rcache.get("%s#%d" % (r["repo"], r["number"]))
+            if not e:
+                continue
+            mine_ev = [x for x in e.get("reviews", []) if x[0] == login]
+            mine_ic = [x for x in e.get("inline", []) if x[0] == login]
+            if not mine_ev and not mine_ic:
+                continue
+            prs_touched += 1
+            ev += len(mine_ev)
+            inline += len(mine_ic)
+            inline_chars += sum(x[1] for x in mine_ic)
+            body_chars += sum(x[2] for x in mine_ev)
+            for _, st, n in mine_ev:
+                if st == "APPROVED":
+                    approvals += 1
+                    if n < 10:
+                        stamps += 1
+                elif st == "CHANGES_REQUESTED":
+                    changes += 1
+                elif st == "COMMENTED":
+                    commented += 1
+        if prs_touched:
+            rd = {
+                "prs_with_detail": prs_touched, "events": ev,
+                "inline_comments": inline, "inline_chars": inline_chars,
+                "body_chars": body_chars, "approvals": approvals,
+                "changes_requested": changes, "commented": commented,
+                "bare_approvals": stamps,
+                "inline_per_pr": round(inline / prs_touched, 1),
+                "substantive_pct": round(
+                    100.0 * (prs_touched - stamps) / prs_touched),
+            }
+
     rev_true = b.get("reviews_true_total", len(REVIEWS))
     rev_trunc = rev_true > len(REVIEWS)
     pr_true = b.get("prs_true_total", len(PRS))
@@ -287,10 +344,21 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
     w("  identity_confidence: %s" % (
         "documented" if P.get("identity_evidence") else "UNDOCUMENTED"))
     w("  caveats:")
+    caveats_json = []
+
+    def cav(cid, sev, detail, **extra):
+        d = {"id": cid, "severity": sev, "detail": detail}
+        d.update(extra)
+        caveats_json.append(d)
 
     w("    - id: line_count_inflation")
     w("      severity: high")
     w("      detail: >-")
+    cav("line_count_inflation", "high",
+        "Raw GitHub additions total %d, but only %d (%.0f%%) are HAND-AUTHORED. "
+        "%d lines are machine-GENERATED and %d are VENDORED third-party content. "
+        "Cite hand_additions_*, never raw additions."
+        % (raw, hand, 100.0 * hand / max(1, raw), gen, ven))
     wrap(w, ("Raw GitHub additions total %d, but only %d (%.0f%%) are "
              "HAND-AUTHORED. %d lines are machine-GENERATED and %d are VENDORED "
              "third-party content. Cite hand_additions_*, never raw additions."
@@ -308,6 +376,12 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
     w("    - id: volume_is_not_impact")
     w("      severity: high")
     w("      detail: >-")
+    cav("volume_is_not_impact", "high",
+        "Line counts measure activity. A small change to a code generator, "
+        "shared library, or CI pipeline can outweigh thousands of lines of "
+        "leaf-level work. Weight ownership_roles, review depth, "
+        "external_upstream_contributions and reviews_given at least as heavily "
+        "as volume, and never rank people on lines alone.")
     wrap(w, ("Line counts measure activity. A small change to a code generator, "
              "shared library, or CI pipeline can outweigh thousands of lines of "
              "leaf-level work. Weight ownership_roles, "
@@ -319,6 +393,11 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: fork_prs_may_double_count")
         w("      severity: high")
         w("      detail: >-")
+        cav("fork_prs_may_double_count", "high",
+            "%d of %d PRs target a FORK rather than the canonical upstream repo, "
+            "holding %d hand-authored lines. Counting both double-counts the "
+            "same work. Canonical merged hand-authored volume is %d."
+            % (len(forks), len(PRS), hand_fork, hand_cm))
         wrap(w, ("%d of %d PRs target a FORK rather than the canonical upstream "
                  "repo, holding %d hand-authored lines. Fork PRs are often "
                  "pre-flight or staging duplicates of an upstream PR; counting "
@@ -329,6 +408,12 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: large_open_share")
         w("      severity: medium")
         w("      detail: >-")
+        cav("large_open_share", "medium",
+            "%d of %d PRs are still OPEN, holding %d of %d hand-authored lines "
+            "(%.0f%%). Merged hand-authored volume is %d. Do not present "
+            "unmerged work as shipped."
+            % (len(open_prs), len(PRS), hand_o, hand,
+               100.0 * hand_o / max(1, hand), hand_m))
         wrap(w, ("%d of %d PRs are still OPEN, holding %d of %d hand-authored "
                  "lines (%.0f%%). Merged hand-authored volume is %d. Do not "
                  "present unmerged work as shipped."
@@ -339,6 +424,13 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("      severity: %s" % ("high" if dup_total > 0.08 * max(1, hand)
                                   else "medium"))
         w("      detail: >-")
+        cav("intra_pr_duplicate_subtree",
+            "high" if dup_total > 0.08 * max(1, hand) else "medium",
+            "%d hand-classified lines (%.0f%% of hand_additions_total) are "
+            "duplicates WITHIN a single PR: a copied subtree. Worst: %s (%d "
+            "lines). See hand_additions_dedup_estimate."
+            % (dup_total, 100.0 * dup_total / max(1, hand),
+               dup_worst[0], dup_worst[1]))
         wrap(w, ("%d hand-classified lines (%.0f%% of hand_additions_total) are "
                  "duplicates WITHIN a single PR: same filename at same line "
                  "count under two path prefixes, i.e. a copied subtree. Worst: "
@@ -349,6 +441,11 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: review_detail_truncated")
         w("      severity: high")
         w("      detail: >-")
+        cav("review_detail_truncated", "high",
+            "GitHub search reports %d reviews in window but pagination captured "
+            "only %d. reviews.total (%d) is the correct headline; per-repo "
+            "breakdowns describe the sample only."
+            % (rev_true, len(REVIEWS), rev_true))
         wrap(w, ("GitHub search reports %d reviews in window but pagination "
                  "captured only %d. reviews.total (%d) is the correct headline; "
                  "reviews.by_repo and top_authors_reviewed describe the "
@@ -358,6 +455,10 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: pr_list_truncated")
         w("      severity: high")
         w("      detail: >-")
+        cav("pr_list_truncated", "high",
+            "Search reports %d authored PRs but only %d were captured "
+            "(1000-result search ceiling). ALL volume figures understate. Split "
+            "the window into shorter ranges and re-scan." % (pr_true, len(PRS)))
         wrap(w, ("Search reports %d authored PRs but only %d were captured "
                  "(1000-result search ceiling). ALL volume figures understate. "
                  "Split the window into shorter ranges and re-scan."
@@ -366,6 +467,10 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: comment_detail_truncated")
         w("      severity: medium")
         w("      detail: >-")
+        cav("comment_detail_truncated", "medium",
+            "Search reports %d comment threads but only %d were captured. "
+            "comment_threads_total (%d) is the correct headline."
+            % (cmt_true, len(CMTS), cmt_true))
         wrap(w, ("Search reports %d comment threads but only %d were captured. "
                  "collaboration.comment_threads_total (%d) is the correct "
                  "headline; top_repos and most_helped are a sample."
@@ -374,6 +479,10 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         w("    - id: file_lists_unavailable")
         w("      severity: medium")
         w("      detail: >-")
+        cav("file_lists_unavailable", "medium",
+            "%d PRs had unreachable file lists (deleted fork or lost access) "
+            "and contribute 0 to all line counts, understating volume."
+            % len(unavail))
         wrap(w, ("%d PRs had unreachable file lists (deleted fork or lost "
                  "access) and contribute 0 to all line counts, understating "
                  "volume: %s" % (len(unavail), ", ".join(
@@ -385,6 +494,9 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
             w("    - id: partial_final_month")
             w("      severity: low")
             w("      detail: >-")
+            cav("partial_final_month", "low",
+                "%s shows %d merged PRs but is a partial month: the window ends "
+                "%s. Do not read it as a trend." % (last, monthly[last], win[1]))
             wrap(w, ("%s shows %d merged PRs but is a partial month: the window "
                      "ends %s. Do not read it as a trend."
                      % (last, monthly[last], win[1])), "        ")
@@ -474,6 +586,35 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
             w("      hand_additions: %d" % p["hand_additions"])
     w("")
 
+    if rd:
+        w("# Review DEPTH, not just count. A count-only metric ranks a reviewer")
+        w("# who leaves 52 bare approvals above one who leaves 50 inline")
+        w("# comments on 9 PRs. These fields separate those two behaviours.")
+        w("review_depth:")
+        w("  prs_with_captured_detail: %d  # of %d reviewed"
+          % (rd["prs_with_detail"], rev_true))
+        w("  review_events: %d" % rd["events"])
+        w("  inline_comments: %d" % rd["inline_comments"])
+        w("  inline_comments_per_pr: %s" % rd["inline_per_pr"])
+        w("  inline_comment_chars: %d" % rd["inline_chars"])
+        w("  review_body_chars: %d" % rd["body_chars"])
+        w("  verdicts:")
+        w("    approved: %d" % rd["approvals"])
+        w("    changes_requested: %d" % rd["changes_requested"])
+        w("    commented: %d" % rd["commented"])
+        w("  bare_approvals: %d  # APPROVED with an empty body" % rd["bare_approvals"])
+        w("  substantive_review_pct: %d" % rd["substantive_pct"])
+        w("  interpretation: >-")
+        wrap(w, ("inline_comments_per_pr is the best single depth signal: it "
+                 "counts line-level engagement with the code. A high "
+                 "changes_requested share means this person blocks bad changes, "
+                 "which is a senior behaviour that costs them social capital. A "
+                 "high bare_approvals count is not automatically bad -- trivial "
+                 "and automated PRs deserve fast approvals -- but if it "
+                 "dominates, the review count is not evidence of depth."),
+             "    ")
+        w("")
+
     w("# Discussion on OTHER people's PRs and issues. Distinct from formal")
     w("# reviews: design debate, triage, unblocking. For some people this is")
     w("# their largest collaboration signal and it is invisible in PR counts.")
@@ -528,6 +669,7 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
              "tests, and high test volume is not automatically rigor."), "    ")
     w("")
 
+    commit_subjects_json = None
     if ccache:
         subs = []
         for p in PRS:
@@ -553,6 +695,13 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
             w("  by_conventional_prefix:")
             for k, n in kinds.most_common():
                 w("    - {prefix: %s, commits: %d}" % (yq(k), n))
+            commit_subjects_json = {
+                "count": len(subs),
+                "by_conventional_prefix": [{"prefix": k, "commits": n}
+                                           for k, n in kinds.most_common()],
+                "items": [{"repo": r_, "pr": n_, "subject": m_}
+                          for r_, n_, m_ in subs[:400]],
+            }
             w("  items:")
             for repo, num, m in subs[:200]:
                 w("    - {repo: %s, pr: %d, subject: %s}"
@@ -560,6 +709,75 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
             if len(subs) > 200:
                 w("    # ... %d more not listed" % (len(subs) - 200))
             w("")
+
+    trajectory_json = None
+    tr = b.get("trend")
+    if tr:
+        e, la = tr["early"], tr["late"]
+
+        def delta(k):
+            lo, hi = e[k], la[k]
+            if lo == 0:
+                return "new" if hi else "flat"
+            return "%+d%%" % round(100.0 * (hi - lo) / lo)
+
+        w("# Two halves of the window compared. Trajectory answers 'is this")
+        w("# person expanding scope?', which a single snapshot cannot.")
+        w("trajectory:")
+        w("  split_date: %s" % yq(tr["split_date"]))
+        w("  early_window: %s" % yq("%s..%s" % tuple(e["window"])))
+        w("  late_window: %s" % yq("%s..%s" % tuple(la["window"])))
+        for k, label in (("prs", "prs_opened"), ("prs_merged", "prs_merged"),
+                         ("reviews", "reviews_given"),
+                         ("comment_threads", "discussion_threads"),
+                         ("repos", "repos_touched")):
+            w("  %s: {early: %d, late: %d, change: %s}"
+              % (label, e[k], la[k], yq(delta(k))))
+        trajectory_json = {
+            "split_date": tr["split_date"],
+            "early_window": "%s..%s" % tuple(e["window"]),
+            "late_window": "%s..%s" % tuple(la["window"]),
+            "caveat": ("Halves are calendar-equal, not effort-equal. Leave, a "
+                       "long incident, an oncall rotation, or one large project "
+                       "landing in a half will swamp the comparison."),
+        }
+        for _k, _lab in (("prs", "prs_opened"), ("prs_merged", "prs_merged"),
+                         ("reviews", "reviews_given"),
+                         ("comment_threads", "discussion_threads"),
+                         ("repos", "repos_touched")):
+            trajectory_json[_lab] = {"early": e[_k], "late": la[_k],
+                                     "change": delta(_k)}
+        w("  caveat: >-")
+        wrap(w, ("Halves are calendar-equal, not effort-equal. Leave, a long "
+                 "incident, an oncall rotation, or a single large project "
+                 "landing in one half will swamp the comparison. Confirm the "
+                 "context before reading a decline as a problem or a rise as "
+                 "growth."), "    ")
+        w("")
+
+    if owners:
+        mine = (owners.get("by_person") or {}).get(login, [])
+        w("# De-facto code ownership from commit history. Distinct from")
+        w("# ownership_roles above, which is formally granted in OWNERS files.")
+        w("de_facto_ownership:")
+        w("  subsystems_dominated: %d" % len(mine))
+        if not mine:
+            w("  items: []")
+        else:
+            w("  items:")
+            for m in sorted(mine, key=lambda x: -x["share_pct"]):
+                w("    - repo: %s" % yq(m["repo"]))
+                w("      directory: %s" % yq(m["directory"]))
+                w("      commits: %d" % m["commits"])
+                w("      of_subsystem_total: %d" % m["of_total"])
+                w("      share_pct: %d" % m["share_pct"])
+                w("      bus_factor: %d" % m["bus_factor"])
+        w("  caveat: >-")
+        wrap(w, ("Attribution is by commit volume, not difficulty or design "
+                 "influence. Someone who shaped a subsystem through review "
+                 "without committing will not appear here. A bus_factor of 1 is "
+                 "a TEAM RISK to address, not a credit to award."), "    ")
+        w("")
 
     w("cadence:")
     w("  merged_by_month:")
@@ -695,6 +913,110 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
 
     out = os.path.join(cfg["outdir"], "%s-evidence.yaml" % pid)
     open(out, "w").write("\n".join(L) + "\n")
+
+    # Structured mirror of the same data. report.py reads this instead of
+    # re-parsing YAML -- a hand-rolled YAML reader is a reliability liability,
+    # and this costs nothing since every value is already computed.
+    for _v in ("commit_subjects_json", "trajectory_json"):
+        if _v not in dir():
+            pass
+    person_json = {
+        "metadata": {
+            "id": pid, "github_login": login, "name": P.get("name"),
+            "team": P.get("team"), "level": P.get("level"),
+            "title": P.get("title"), "manager": P.get("manager"),
+            "scan_date": scan, "window_start": win[0], "window_end": win[1],
+            "visibility": b.get("visibility", "public"),
+            "classifier_version": b.get("classifier_version", 1),
+            "identity_resolution": (P.get("identity_evidence") or
+                                    "NOT DOCUMENTED."),
+            "identity_confidence": ("documented" if P.get("identity_evidence")
+                                    else "UNDOCUMENTED"),
+            "scope": cfg["scope_note"],
+            "caveats": caveats_json,
+        },
+        "summary": {
+            "recommended_metric": "hand_additions_canonical_merged",
+            "prs_authored": len(PRS), "prs_merged": len(merged),
+            "prs_open": len(open_prs), "prs_closed_unmerged": len(closed_un),
+            "merge_rate_pct": round(100.0 * len(merged) / len(PRS), 1),
+            "repos_touched": len(by_repo), "reviews_given": rev_true,
+            "review_to_authorship_ratio": round(rev_true / len(PRS), 2),
+            "comment_threads_on_others_work": cmt_true,
+            "issues_opened": len(ISSUES),
+            "hand_additions_canonical_merged": hand_cm,
+            "hand_additions_total": hand, "hand_additions_merged": hand_m,
+            "hand_additions_open": hand_o, "hand_additions_in_forks": hand_fork,
+            "hand_additions_dedup_estimate": hand - dup_total,
+            "generated_additions_excluded": gen,
+            "vendored_additions_excluded": ven,
+            "raw_additions_total": raw, "deletions_total": dele,
+            "test_line_share_pct": round(
+                100.0 * test_lines / max(1, test_lines + impl_lines)),
+            "cycle_time_days_median": (round(pct(cycles, 0.5), 1)
+                                       if cycles else None),
+        },
+        "ownership_roles": roles,
+        "review_depth": rd,
+        "trajectory": trajectory_json,
+        "de_facto_ownership": {"items": (
+            sorted((owners.get("by_person") or {}).get(login, []),
+                   key=lambda x: -x["share_pct"]) if owners else [])},
+        "external_upstream_contributions": {
+            "count": len(ext),
+            "items": [{"repo": p["repo"], "upstream_stars": p["_stars"],
+                       "number": p["number"], "title": p["title"],
+                       "url": p["url"],
+                       "status": ("MERGED" if p.get("merged_at")
+                                  else p["state"].upper()),
+                       "hand_additions": p["hand_additions"]}
+                      for p in sorted(ext, key=lambda x: -(x["_stars"] or 0))],
+        },
+        "fork_activity": {"count": len(forks), "hand_additions": hand_fork},
+        "collaboration": {
+            "comment_threads_total": cmt_true, "detail_captured": len(CMTS),
+            "on_pull_requests": cmt_pr, "on_issues": len(CMTS) - cmt_pr,
+            "distinct_people_helped": len(cmt_authors),
+            "top_repos": [{"repo": r_, "threads": c}
+                          for r_, c in cmt_repos.most_common(15)],
+            "most_helped": [{"author": u, "threads": c}
+                            for u, c in cmt_authors.most_common(15)],
+        },
+        "language_mix": [{"language": lg, "hand_lines": n,
+                          "pct": round(100.0 * n / max(1, sum(lang.values())))}
+                         for lg, n in lang.most_common(12)],
+        "authored_commit_subjects": commit_subjects_json,
+        "largest_hand_authored": [
+            {"repo": p["repo"], "number": p["number"], "title": p["title"],
+             "url": p["url"],
+             "status": ("MERGED" if p.get("merged_at") else p["state"].upper()),
+             "hand_additions": p["hand_additions"],
+             "generated_additions": p["generated_additions"],
+             "changed_files": p.get("changed_files", 0),
+             "review_comments": p.get("review_comments", 0)}
+            for p in top],
+        "open_and_wip": {
+            "count": len(open_prs), "hand_additions_parked": hand_o,
+            "probe": ("Ask about the long-lived ones: blocked on upstream "
+                      "review, deprioritized, or abandoned?"),
+            "items": [
+                {"repo": p["repo"], "number": p["number"], "title": p["title"],
+                 "url": p["url"], "opened": p["created_at"][:10],
+                 "age_days": (scan_d - datetime.date(
+                     *map(int, p["created_at"][:10].split("-")))).days,
+                 "hand_additions": p["hand_additions"]}
+                for p in sorted(open_prs, key=lambda x: x["created_at"])],
+        },
+        "by_repo": [
+            {"repo": r_, "prs_total": v_["total"], "prs_merged": v_["merged"],
+             "hand_additions": v_["hand"], "generated_additions": v_["gen"],
+             "vendored_additions": v_["ven"], "is_fork": v_["fork"]}
+            for r_, v_ in sorted(by_repo.items(),
+                                 key=lambda x: (-x[1]["total"], x[0]))],
+    }
+    json.dump(person_json,
+              open(os.path.join(cfg["outdir"], "%s-evidence.json" % pid), "w"),
+              indent=1, default=str)
     print("%-20s -> %-32s hand_canonical_merged=%-8d roles=%d"
           % (login, os.path.basename(out), hand_cm, len(roles)))
 
@@ -713,6 +1035,13 @@ def build_person(path, cfg, bucket, cache, rmeta, ometa, ccache=None):
         "cycle_median": round(pct(cycles, 0.5), 1) if cycles else None,
         "test_share": round(100.0 * test_lines / max(1, test_lines + impl_lines)),
         "top_language": (lang.most_common(1)[0][0] if lang else None),
+        "inline_per_pr": (rd["inline_per_pr"] if rd else None),
+        "inline_comments": (rd["inline_comments"] if rd else 0),
+        "bare_approvals": (rd["bare_approvals"] if rd else None),
+        "owned_subsystems": (len((owners.get("by_person") or {}).get(login, []))
+                             if owners else 0),
+        "trend": tr,
+        "visibility": b.get("visibility", "public"),
         "identity": "documented" if P.get("identity_evidence") else "UNDOCUMENTED",
         "truncated": rev_trunc or pr_trunc,
     }
@@ -780,6 +1109,17 @@ def build_index(rows, cfg):
         w("    repos_touched: %d" % r["repos_touched"])
         w("    reviews_given: %d" % r["reviews_given"])
         w("    comment_threads_on_others_work: %d" % r["comment_threads"])
+        if r["inline_per_pr"] is not None:
+            w("    inline_comments: %d" % r["inline_comments"])
+            w("    inline_comments_per_reviewed_pr: %s" % r["inline_per_pr"])
+            w("    bare_approvals: %d" % r["bare_approvals"])
+        if r["owned_subsystems"]:
+            w("    de_facto_owned_subsystems: %d" % r["owned_subsystems"])
+        if r.get("trend"):
+            t = r["trend"]
+            w("    trajectory: {prs: '%d->%d', reviews: '%d->%d'}"
+              % (t["early"]["prs"], t["late"]["prs"],
+                 t["early"]["reviews"], t["late"]["reviews"]))
         w("    review_to_authorship_ratio: %s" % r["review_ratio"])
         w("    hand_canonical_merged: %d" % r["hand_canonical_merged"])
         w("    hand_total: %d" % r["hand_total"])
@@ -801,6 +1141,7 @@ def build_index(rows, cfg):
     for key, label in (("hand_canonical_merged", "shipped authored volume"),
                        ("reviews_given", "review load / force multiplication"),
                        ("comment_threads", "discussion reach on others' work"),
+                       ("inline_comments", "review DEPTH -- line-level engagement"),
                        ("prs_merged", "merged PR count"),
                        ("repos_touched", "breadth"),
                        ("roles", "formal ownership granted by others")):
@@ -808,12 +1149,42 @@ def build_index(rows, cfg):
         for r in sorted(rows, key=lambda x: -x[key]):
             w("    - {id: %s, value: %d}" % (r["id"], r[key]))
     w("")
+    if cfg.get("ownership"):
+        o = cfg["ownership"]
+        risk = o.get("bus_factor_risk", [])
+        w("# TEAM RISK, not individual performance. Subsystems where one person")
+        w("# is at least half the commits. Address these with staffing and")
+        w("# pairing decisions, not with a review comment.")
+        w("bus_factor_risk:")
+        w("  count: %d" % len(risk))
+        if not risk:
+            w("  items: []")
+        else:
+            w("  items:")
+            for s_ in risk[:25]:
+                w("    - {repo: %s, directory: %s, sole_author: %s, "
+                  "commits: %d, of_total: %d}"
+                  % (yq(s_["repo"]), yq(s_["directory"]), yq(s_["top_author"]),
+                     s_["top_author_commits"], s_["commits_in_window"]))
+        w("  caveat: >-")
+        wrap(w, o.get("caveat", ""), "    ")
+        w("")
+
     w("cross_cohort_notes:")
+    notes_json = []
+
+    def note(nid, sev, detail):
+        notes_json.append({"id": nid, "severity": sev, "detail": detail})
+
     und = [r["id"] for r in rows if r["identity"] == "UNDOCUMENTED"]
     if und:
         w("  - id: undocumented_identity")
         w("    severity: high")
         w("    detail: >-")
+        note("undocumented_identity", "high",
+             "No identity evidence recorded for: %s. A GitHub login is not a "
+             "person. Confirm before using those files in a review."
+             % ", ".join(und))
         wrap(w, ("No identity evidence recorded for: %s. A GitHub login is not "
                  "a person. Confirm before using those files in a review."
                  % ", ".join(und)), "      ")
@@ -822,6 +1193,9 @@ def build_index(rows, cfg):
         w("  - id: truncated_data")
         w("    severity: high")
         w("    detail: >-")
+        note("truncated_data", "high",
+             "Hit a search-API ceiling for: %s. Headline totals are correct but "
+             "per-repo breakdowns are samples." % ", ".join(tr))
         wrap(w, ("Hit a search-API ceiling for: %s. Headline totals are correct "
                  "but per-repo breakdowns are samples. See each file's caveats."
                  % ", ".join(tr)), "      ")
@@ -830,22 +1204,72 @@ def build_index(rows, cfg):
         w("  - id: mixed_levels")
         w("    severity: medium")
         w("    detail: >-")
+        note("mixed_levels", "medium",
+             "This cohort spans %s. Compare each person against their level "
+             "expectations, not against each other." % ", ".join(sorted(levels)))
         wrap(w, ("This cohort spans %s. Compare each person against their level "
                  "expectations, not against each other."
                  % ", ".join(sorted(levels))), "      ")
     w("  - id: repo_count_not_portable")
     w("    severity: low")
     w("    detail: >-")
+    note("repo_count_not_portable", "low",
+         "repos_touched is not comparable across ecosystems. A project split "
+         "into many small repos inflates it against a monorepo.")
     wrap(w, ("repos_touched is not comparable across ecosystems. A project split "
              "into 100 small repos inflates it relative to a monorepo. Check "
              "each person's by_repo before reading breadth into it."), "      ")
-    w("  - id: public_github_only")
-    w("    severity: high")
-    w("    detail: >-")
-    wrap(w, cfg["scope_note"], "      ")
+    if any(r.get("visibility") == "all" for r in rows):
+        w("  - id: contains_private_repo_data")
+        w("    severity: high")
+        w("    detail: >-")
+        note("contains_private_repo_data", "high",
+             "This scan INCLUDED PRIVATE repositories. Repo names and PR titles "
+             "may be confidential. Do not commit, paste, or forward them.")
+        wrap(w, ("This scan INCLUDED PRIVATE repositories. Repo names and PR "
+                 "titles in these files may be confidential. Do not commit, "
+                 "paste, or forward them outside the people already entitled to "
+                 "see that work."), "      ")
+    else:
+        w("  - id: public_github_only")
+        w("    severity: high")
+        w("    detail: >-")
+        note("public_github_only", "high", cfg["scope_note"])
+        wrap(w, cfg["scope_note"], "      ")
 
     out = os.path.join(cfg["outdir"], "COHORT-INDEX.yaml")
     open(out, "w").write("\n".join(L) + "\n")
+
+    index_json = {
+        "scan": {"scan_date": cfg["scan_date"],
+                 "window_start": cfg["window"]["start"],
+                 "window_end": cfg["window"]["end"],
+                 "classifier_version": cfg["classifier_version"],
+                 "people": len(rows), "scope": cfg["scope_note"]},
+        "how_to_use": {
+            "best_volume_metric": "hand_canonical_merged",
+            "why": ("Hand-authored, merged, in the canonical upstream repo. "
+                    "Excludes generated code, vendored content, unmerged work "
+                    "and fork duplicates."),
+            "do_not_use": "raw additions from the GitHub UI or API",
+        },
+        "cohort": [dict(r, file="%s-evidence.yaml" % r["id"],
+                        json_file="%s-evidence.json" % r["id"]) for r in rows],
+        "rankings": {
+            "by_%s" % k: [{"id": r["id"], "value": r[k]}
+                          for r in sorted(rows, key=lambda x: -(x[k] or 0))]
+            for k in ("hand_canonical_merged", "reviews_given",
+                      "inline_comments", "comment_threads", "prs_merged",
+                      "repos_touched", "roles")
+        },
+        "cross_cohort_notes": notes_json,
+        "bus_factor_risk": ((cfg.get("ownership") or {}).get("bus_factor_risk")
+                            or []),
+        "ownership_caveat": (cfg.get("ownership") or {}).get("caveat", ""),
+    }
+    json.dump(index_json,
+              open(os.path.join(cfg["outdir"], "COHORT-INDEX.json"), "w"),
+              indent=1, default=str)
     print("\ncohort index -> %s" % out)
 
 
@@ -877,6 +1301,15 @@ def main():
     ccache = json.load(open(cpath)) if os.path.exists(cpath) else {}
     if ccache:
         print("commit subjects available for %d PRs" % len(ccache))
+    rpath = os.path.join(a.outdir, "reviewcache.json")
+    rcache = json.load(open(rpath)) if os.path.exists(rpath) else {}
+    if rcache:
+        print("review depth available for %d PRs" % len(rcache))
+    opath = os.path.join(a.outdir, "ownership.json")
+    owners = json.load(open(opath)) if os.path.exists(opath) else None
+    if owners:
+        print("ownership map available (%d subsystems)"
+              % owners.get("subsystems_analyzed", 0))
 
     own = {o.lower() for o in a.own_orgs}
     if not own:
@@ -891,7 +1324,7 @@ def main():
         print("inferred own_orgs=%s (override with --own-orgs)" % sorted(own))
 
     cfg = {
-        "scan_date": a.scan_date, "outdir": a.outdir,
+        "scan_date": a.scan_date, "outdir": a.outdir, "ownership": owners,
         "window": roster["window"], "own_orgs": own,
         "external_star_floor": a.external_star_floor,
         "ownership_repo_limit": a.ownership_repo_limit,
@@ -906,7 +1339,8 @@ def main():
         if not os.path.exists(path):
             print("SKIP %s -- no bundle (run fetch.py)" % pid)
             continue
-        r = build_person(path, cfg, bucket, cache, rmeta, ometa, ccache)
+        r = build_person(path, cfg, bucket, cache, rmeta, ometa, ccache,
+                         rcache, owners)
         if r:
             rows.append(r)
 

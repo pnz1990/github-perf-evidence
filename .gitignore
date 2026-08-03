@@ -6,7 +6,12 @@ __pycache__/
 roster.json
 filecache.json
 commitcache.json
+reviewcache.json
+ownership.json
 patterns.json
 audit-report.txt
 *-evidence.yaml
+*-evidence.json
 COHORT-INDEX.yaml
+COHORT-INDEX.json
+report.html

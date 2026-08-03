@@ -13,6 +13,16 @@ With --commits, also writes commitcache.json: {"repo#num": [[author, subject]]}.
 Commit subjects are what let a reader see WHAT someone built rather than only
 how much; line counts alone cannot distinguish a refactor from a feature. Costs
 one extra API call per PR, hence opt-in.
+
+With --review-depth, writes reviewcache.json:
+  {"repo#num": {"reviews": [[login, state, body_chars]],
+                "inline": [[login, body_chars]]}}
+
+This exists because review COUNT is a bad metric on its own. Measured on real
+PRs, one reviewer had 52 review events and 11 inline comments while another had
+9 events and 50 inline comments. A count-only report ranks the first person 5.8x
+higher; they are doing different work, and only the second was engaging deeply.
+Costs 2 extra calls per reviewed PR.
 """
 import argparse
 import glob
@@ -22,7 +32,8 @@ import subprocess
 import sys
 
 # Working files, not person bundles.
-SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json")
+SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json",
+              "reviewcache.json", "ownercache.json")
 
 
 def main():
@@ -33,7 +44,15 @@ def main():
     ap.add_argument("--commits", action="store_true",
                     help="also cache commit subjects per PR (1 extra call/PR). "
                          "Lets the report say what was built, not just how much.")
+    ap.add_argument("--review-depth", action="store_true",
+                    help="also cache review verdicts + inline comment counts "
+                         "(2 extra calls/PR). Distinguishes a substantive review "
+                         "from a rubber stamp.")
+    ap.add_argument("--all", action="store_true",
+                    help="shorthand for --commits --review-depth")
     a = ap.parse_args()
+    if a.all:
+        a.commits = a.review_depth = True
 
     path = os.path.join(a.outdir, "filecache.json")
     cache = {} if a.refetch else (
@@ -41,6 +60,9 @@ def main():
     cpath = os.path.join(a.outdir, "commitcache.json")
     ccache = {} if a.refetch else (
         json.load(open(cpath)) if os.path.exists(cpath) else {})
+    rpath = os.path.join(a.outdir, "reviewcache.json")
+    rcache = {} if a.refetch else (
+        json.load(open(rpath)) if os.path.exists(rpath) else {})
 
     keys = []
     for f in sorted(glob.glob(os.path.join(a.outdir, "*.json"))):
@@ -51,10 +73,18 @@ def main():
             continue
         for p in b["prs"]:
             keys.append((p["repo"], p["number"]))
+        if a.review_depth:
+            # Reviewed PRs are usually NOT in anyone's authored list, so they
+            # must be added explicitly or review depth would only cover
+            # self-reviewed work.
+            for r in b.get("reviews", []):
+                keys.append((r["repo"], r["number"]))
 
     keys = list(dict.fromkeys(keys))       # dedupe: people co-author PRs
-    todo = [k for k in keys if "%s#%d" % k not in cache
-            or (a.commits and "%s#%d" % k not in ccache)]
+    todo = [k for k in keys
+            if "%s#%d" % k not in cache
+            or (a.commits and "%s#%d" % k not in ccache)
+            or (a.review_depth and "%s#%d" % k not in rcache)]
     print("unique PRs=%d cached=%d todo=%d"
           % (len(keys), len(keys) - len(todo), len(todo)))
 
@@ -76,6 +106,37 @@ def main():
                     pass
             cache[key] = files if (files or r.returncode == 0) else None
 
+        if a.review_depth and key not in rcache:
+            rv = subprocess.run(
+                ["gh", "api", "--paginate",
+                 "repos/%s/pulls/%d/reviews" % (repo, num), "--jq",
+                 '.[]|[(.user.login//"unknown"),.state,(.body|length)]|@tsv'],
+                capture_output=True, text=True)
+            reviews = []
+            for line in rv.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) == 3:
+                    try:
+                        reviews.append([parts[0], parts[1], int(parts[2])])
+                    except ValueError:
+                        pass
+            ic = subprocess.run(
+                ["gh", "api", "--paginate",
+                 "repos/%s/pulls/%d/comments" % (repo, num), "--jq",
+                 '.[]|[(.user.login//"unknown"),(.body|length)]|@tsv'],
+                capture_output=True, text=True)
+            inline = []
+            for line in ic.stdout.strip().splitlines():
+                parts = line.split("\t")
+                if len(parts) == 2:
+                    try:
+                        inline.append([parts[0], int(parts[1])])
+                    except ValueError:
+                        pass
+            ok = rv.returncode == 0 and ic.returncode == 0
+            rcache[key] = ({"reviews": reviews, "inline": inline}
+                           if (reviews or inline or ok) else None)
+
         if a.commits and key not in ccache:
             r2 = subprocess.run(
                 ["gh", "api", "--paginate",
@@ -94,12 +155,17 @@ def main():
             json.dump(cache, open(path, "w"))
             if a.commits:
                 json.dump(ccache, open(cpath, "w"))
+            if a.review_depth:
+                json.dump(rcache, open(rpath, "w"))
             print("  %d/%d" % (i, len(todo)))
 
     json.dump(cache, open(path, "w"))
     if a.commits:
         json.dump(ccache, open(cpath, "w"))
         print("commit subjects cached: %d PRs" % len(ccache))
+    if a.review_depth:
+        json.dump(rcache, open(rpath, "w"))
+        print("review depth cached: %d PRs" % len(rcache))
     failed = [k for k, v in cache.items() if v is None]
     print("done. entries=%d failed=%d" % (len(cache), len(failed)))
     for f in failed[:20]:
