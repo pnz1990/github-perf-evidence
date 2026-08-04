@@ -9,7 +9,7 @@ shipped over a review period.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-stdlib%20only-green)
-![Tests](https://img.shields.io/badge/tests-232%20offline-brightgreen)
+![Tests](https://img.shields.io/badge/tests-260%20offline-brightgreen)
 
 ---
 
@@ -127,10 +127,16 @@ Claude Code discovers it automatically. Then just ask:
 
 > *"Run a contribution review for octocat, hubber and mona, January through June."*
 
-Claude runs the whole pipeline itself — including the two steps that need a
-model — and hands you a finished HTML report. **You do not run any Python.** It
-will ask you two things: who is in scope with what dates, and whether to include
-private repos. Everything else it does and reports back.
+Or don't name anyone at all:
+
+> *"Run a contribution review for everyone active in the acme-corp org, January
+> through June."*
+
+Claude discovers the roster, shows it to you to confirm, then runs the whole
+pipeline itself — including the two steps that need a model — and hands you a
+finished HTML report. **You do not run any Python.** It will ask you two things:
+who or which org is in scope with what dates, and whether to include private
+repos. Everything else it does and reports back.
 
 This matters for the LLM steps in particular: classifying review comments and
 writing insights are things the agent does inline. Running the scripts by hand
@@ -167,15 +173,43 @@ OUT=~/perf-review-2026-h1     # NOT inside this repo -- output names real people
 
 ### 1. Build a roster
 
+You do not need a list of names. Point it at an org (or a set of repos) and it
+finds who was active:
+
 ```bash
-python3 $S/discover.py --org YOUR_ORG --days 180 -o roster.json
-# or: --repo owner/repo-a --repo owner/repo-b --start 2026-01-01 --end 2026-06-30
+python3 $S/discover.py --org YOUR_ORG --start 2026-01-01 --end 2026-06-30 \
+    --include-reviewers --members-only -o roster.json
+# or: --repo owner/repo-a --repo owner/repo-b --per-repo ...
 ```
 
-**Then edit `roster.json`.** Discovery finds everyone who opened a PR, including
-outside contributors, and deliberately leaves `identity_evidence` blank — it
-proves a *login* was active, not who the human is. Fill that in. See
+| Flag | |
+|---|---|
+| `--per-repo` | search each repo separately. **Default for `--org`.** One org-wide query silently truncates at GitHub's 1,000-result cap; per-repo raises the ceiling to 1,000 *per repo* and reports anything that still truncates |
+| `--include-reviewers` | also find people who reviewed or commented but never authored a PR |
+| `--members-only` | drop outside contributors using org membership (needs `read:org`) |
+| `--include-forks` / `--include-archived` | off by default; forked repos' contributors are usually upstream, not your team |
+| `--min-activity` | floor on authored + review events, so a review-only contributor qualifies on review volume alone |
+| `--max-repos` | cap repos searched, **most recently pushed first** |
+
+`--include-reviewers` exists because author-only discovery misses the person
+whose contribution *is* review. Measured on a real org: one contributor had
+**0 authored PRs and 7 review comments**, and a second had 0 and 1. Both are
+invisible without it, which is the exact failure this whole tool exists to
+prevent.
+
+Repos with no push inside the window are pruned before any search runs, so
+pointing this at a large org costs a few dozen searches rather than several
+hundred. Everything skipped is reported in `discovery.skipped_repos`.
+
+**Then confirm `roster.json`.** Discovery finds everyone active, including
+outside contributors, alumni and people on other teams. It deliberately leaves
+`identity_evidence` blank — it proves a *login* was active, not who the human is.
+Fill that in. The `_`-prefixed fields (`_org_member`, `_authored_prs_in_window`)
+are discovery hints to speed up that pass, not evidence. See
 [`roster.example.json`](roster.example.json).
+
+If `discovery.truncated_scopes` is non-empty, the roster is **incomplete** —
+narrow the window and re-run.
 
 ```json
 {
@@ -324,7 +358,7 @@ python3 $S/insights.py --outdir $OUT --prompt > prompt.txt
 python3 $S/insights.py --outdir $OUT --load notes.json
 ```
 
-Eleven deterministic detectors look for patterns across the cohort, then an LLM
+Twelve deterministic detectors look for patterns across the cohort, then an LLM
 turns them into actions. The split is deliberate: detectors produce every number,
 so the LLM can only interpret measured figures rather than invent plausible ones.
 
@@ -349,6 +383,15 @@ manager rarely has time to cross-reference:
 The rendered section gives each insight a **Finding**, **Why missed**, **Do
 this**, and **Unless** (what would make the reading wrong), plus suggested 1:1
 questions and an explicit *Do NOT conclude* list.
+
+**Insights also render on each person's own tab**, above their numbers, filtered
+to the findings that name them. That ordering is the feature: opening a tab to
+prepare for a 1:1 should show you the interpretation and its caveats *before* a
+raw line count. Findings about the person come first; team-level ones follow,
+labelled **the manager's to fix** so a staffing or tooling gap never reads as an
+individual criticism. The header counts the two separately (*"1 about them,
+2 team-wide"*), and someone no insight names gets an explicit note saying that
+absence is not a signal in either direction.
 
 ### 9. Read
 
@@ -436,7 +479,7 @@ path-based classification is a heuristic and a good-faith lower bound.
 python3 tests/test_pipeline.py
 ```
 
-232 assertions, fully offline — no network, no `gh`, no pip. Exit code is
+260 assertions, fully offline — no network, no `gh`, no pip. Exit code is
 non-zero on failure so it drops into CI as-is.
 
 Every real bug found while building this has a named regression test: variable
@@ -455,7 +498,7 @@ single classifier rule makes six of them fail — including the one that reports
 | [`ETHICS.md`](ETHICS.md) | what the numbers do and don't mean |
 | [`references/classification.md`](references/classification.md) | verified pattern table, per-ecosystem gotchas, how to verify a new rule |
 | [`references/methodology.md`](references/methodology.md) | API ceilings, fork double-counting, fairness |
-| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 232 offline assertions |
+| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 260 offline assertions |
 
 ## Contributing
 

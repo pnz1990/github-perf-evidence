@@ -451,6 +451,19 @@ def main():
     data = compute(a.outdir)
     path = os.path.join(a.outdir, "insights.json")
 
+    # A bare re-run recomputes the detectors and rewrites insights.json. That
+    # MUST NOT destroy a narrative that was already attached: writing the
+    # narrative costs an LLM pass over the whole cohort, and losing it is
+    # silent -- report.py simply omits the Insights tab and the user is left
+    # wondering where their section went. So carry the old narrative forward.
+    prior = {}
+    if os.path.exists(path):
+        try:
+            prior = json.load(open(path, encoding="utf-8")) or {}
+        except (json.JSONDecodeError, OSError):
+            prior = {}
+    kept = prior.get("narrative")
+
     if a.load:
         raw = open(a.load, encoding="utf-8").read().strip()
         m = re.search(r"\{.*\}", raw, re.S)      # tolerate ``` fences
@@ -470,15 +483,22 @@ def main():
         print("now re-run report.py to render them")
         return 0
 
+    if kept and (kept.get("insights") or []):
+        data["narrative"] = kept
+
     json.dump(data, open(path, "w"), indent=1, default=str)
 
     if a.prompt:
         print(PROMPT)
-        print(json.dumps(data, indent=1, default=str))
+        print(json.dumps(data["detectors"], indent=1, default=str))
         return 0
 
     d = data["detectors"]
     print("wrote %s" % path)
+    if kept and (kept.get("insights") or []):
+        print("kept the %d existing narrative insight(s); detectors were "
+              "recomputed, so re-run --prompt/--load if the underlying data "
+              "changed" % len(kept["insights"]))
     print("\ndetector summary:")
     for k, v in d.items():
         if v is None:

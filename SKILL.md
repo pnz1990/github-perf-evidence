@@ -44,9 +44,37 @@ someone opens one PR.
 
 Ask these together, once, then proceed without further check-ins:
 
-1. **Who and what window?** GitHub logins (or an org to discover from) and dates.
+1. **Who and what window?** GitHub logins, **or just an org or a repo list** and
+   dates. If they name an org or repos rather than people, run `discover.py`
+   yourself and confirm the roster with them before scanning -- do not make them
+   list names they do not have.
 2. **Any private repos?** Default is public-only. `--visibility all` includes
    private repos their token can read, and makes the output confidential.
+
+### If the user gave you an org or repos instead of names
+
+```bash
+python3 $S/discover.py --org ORG --start 2026-01-01 --end 2026-06-30 \
+    --include-reviewers --members-only -o $OUT/roster.json
+```
+
+`--per-repo` is the default for `--org` and searches each repo separately,
+because one org-wide query silently truncates at GitHub's 1,000-result ceiling
+and whoever falls outside that window is simply absent with no error.
+
+Always pass `--include-reviewers`. Author-only discovery drops the person whose
+contribution IS review: a real measured case had 2 PRs and 6 hand-authored lines
+alongside 8 reviews and 13 discussion threads.
+
+`--members-only` prunes outside contributors automatically, but it needs
+`read:org`; if membership is unreadable the tool says so and prunes nothing.
+
+Then **show the user the roster and get confirmation before scanning.**
+Discovery finds everyone active, which includes outside contributors, alumni and
+people on other teams. Report the `_org_member` and `_authored_prs_in_window`
+hints, flag anyone you are unsure about, and check
+`discovery.truncated_scopes` -- if it is non-empty the roster is incomplete and
+you must say so rather than proceeding quietly.
 
 Then **resolve identity yourself** before scanning: check `gh api users/<login>`
 for name and company, and look for a local doc that states the handle. Write what
@@ -68,8 +96,10 @@ repo.
 S=~/.claude/skills/github-perf-evidence/scripts
 OUT=~/perf-review-2026-h1     # outside the skill dir
 
-python3 $S/discover.py  --org ORG --days 180 -o $OUT/roster.json   # optional
-#   then EDIT roster.json yourself: drop non-team members, fill identity_evidence
+python3 $S/discover.py  --org ORG --days 180 --include-reviewers \
+                        --members-only -o $OUT/roster.json     # if no names given
+#   then EDIT roster.json yourself: drop non-team members, fill identity_evidence,
+#   and CONFIRM the list with the user before scanning
 
 python3 $S/fetch.py     --roster $OUT/roster.json --outdir $OUT --dry-run
 python3 $S/fetch.py     --roster $OUT/roster.json --outdir $OUT --compare-window
@@ -153,6 +183,18 @@ Your job is to say what the manager should DO. The split exists so you can only
 interpret measured figures -- **never cite a number the detectors did not
 produce.**
 
+**Set `who` accurately on every insight.** It is not just a label: `report.py`
+uses it to render each insight at the top of that person's own tab, above their
+numbers. An insight with an empty or wrong `who` never reaches the tab the
+manager actually reads before a 1:1. Set `audience: "team"` for anything that is
+a staffing, tooling or process problem, so it renders as the manager's to fix
+rather than as a criticism of whoever it names.
+
+**A bare re-run of `insights.py` keeps an existing narrative** and says so. But
+if the underlying data changed (a re-fetch, a re-classify, or comment analysis
+finishing), re-run `--prompt` and write a fresh narrative: the old one may cite
+numbers the detectors no longer produce.
+
 When you narrate:
 
 - Prefer insights crossing two or more detectors. Single-metric observations are
@@ -185,5 +227,5 @@ Quote `hand_additions_canonical_merged` for volume. Never quote raw additions.
 ## Tests
 
 ```bash
-python3 tests/test_pipeline.py     # 232 assertions, offline, no gh needed
+python3 tests/test_pipeline.py     # 260 assertions, offline, no gh needed
 ```

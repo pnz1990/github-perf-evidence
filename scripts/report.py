@@ -138,6 +138,8 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12.5px
 .dfx .k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim)}
 .dnc{border-left:4px solid var(--bad);background:var(--panel2);border-radius:8px;
  padding:12px 15px;margin:9px 0;font-size:13.5px}
+.pins{border-color:var(--accent)}
+.pins>h3{display:flex;align-items:center;gap:9px}
 """
 
 JS = """
@@ -199,6 +201,35 @@ def trend_cell(d):
     cls = "up" if ch.startswith("+") else ("down" if ch.startswith("-") else "flat")
     return ('%s &rarr; %s <span class="%s">%s</span>'
             % (num(d.get("early")), num(d.get("late")), cls, e(ch)))
+
+
+def insights_for(pid, narr):
+    """Split the cohort narrative into the parts that concern one person.
+
+    An insight naming several people appears on each of their tabs, because a
+    manager reads one tab before a 1:1 and must not have to reconstruct which
+    cohort-level findings applied to the person in front of them.
+
+    The `audience` field is preserved deliberately: a team-level finding that
+    happens to name someone is the MANAGER's problem, not that person's, and
+    rendering it on their tab without that label would turn a staffing or
+    tooling gap into an individual criticism.
+    """
+    mine, qs = [], []
+    for it in (narr.get("insights") or []):
+        who = it.get("who") or []
+        if pid in who:
+            mine.append(it)
+    for q in (narr.get("questions_for_1on1s") or []):
+        if q.get("who") == pid:
+            qs.append(q)
+    order = {"high": 0, "medium": 1, "low": 2}
+    # Severity first, then individual before team AT EQUAL SEVERITY. Opening
+    # someone's tab to prepare for a 1:1 and meeting a cohort-wide tooling
+    # finding first buries the thing that is actually about them.
+    mine.sort(key=lambda x: (order.get(str(x.get("severity")), 3),
+                             0 if str(x.get("audience")) != "team" else 1))
+    return mine, qs
 
 
 def build_html(idx, people, owners, title, insights=None,
@@ -496,6 +527,82 @@ def build_html(idx, people, owners, title, insights=None,
         a('<div class="banner %s"><b>identity resolution</b>%s</div>'
           % ("low" if ic == "documented" else "high",
              e(m.get("identity_resolution", ""))))
+
+        # ---- per-person insights, ABOVE the numbers on purpose.
+        # A manager opening this tab before a 1:1 should meet the
+        # interpretation and its caveats first. Leading with the KPI strip
+        # invites reading the line count as the headline, which is the exact
+        # error this tool exists to prevent.
+        p_ins, p_qs = insights_for(m.get("id") or m.get("github_login"), narr)
+        if p_ins or p_qs:
+            n_team = sum(1 for x in p_ins if str(x.get("audience")) == "team")
+            n_ind = len(p_ins) - n_team
+            a('<div class="card pins">')
+            a('<h3 style="margin-top:0">What stands out for %s'
+              % e(m.get("name") or m.get("github_login")))
+            # Counted separately on purpose: "3 findings" on a person's tab
+            # reads as three things about them. Two of those may be team-wide
+            # problems that merely name them.
+            if n_ind:
+                a('<span class="pill warn">%d about them</span>' % n_ind)
+            if n_team:
+                a('<span class="pill">%d team-wide</span>' % n_team)
+            a("</h3>")
+            a('<p class="note">Drawn from the cohort-wide '
+              '<b>Insights</b> tab, filtered to findings that name this '
+              'person. The numbers are measured; the reading is judgement. '
+              'Read the <b>Unless</b> line before acting on any of it.</p>')
+            for it in p_ins:
+                sev = str(it.get("severity", "low"))
+                aud = str(it.get("audience", ""))
+                a('<div class="ins %s">' % e(sev))
+                a("<h4>%s</h4>" % e(it.get("title")))
+                a('<div class="meta">')
+                a('<span class="pill %s">%s</span>'
+                  % ("bad" if sev == "high" else "warn" if sev == "medium"
+                     else "", e(sev)))
+                if aud == "team":
+                    # Load-bearing label: see insights_for().
+                    a('<span class="pill">team-level &mdash; '
+                      'the manager\'s to fix</span>')
+                elif aud:
+                    a('<span class="pill">%s</span>' % e(aud))
+                conf = str(it.get("confidence", ""))
+                if conf:
+                    a('<span class="pill %s">confidence: %s</span>'
+                      % ("ok" if conf == "high" else "warn"
+                         if conf == "medium" else "bad", e(conf)))
+                others = [w for w in (it.get("who") or [])
+                          if w != (m.get("id") or m.get("github_login"))]
+                if others:
+                    a('<span class="pill">also: %s</span>'
+                      % e(", ".join(others)))
+                a("</div><dl>")
+                for label, key, cls in (("Finding", "finding", ""),
+                                        ("Why missed", "why_missed", ""),
+                                        ("Do this", "action", "act"),
+                                        ("Unless", "caveat", "cav")):
+                    if it.get(key):
+                        a("<dt>%s</dt><dd%s>%s</dd>"
+                          % (e(label), ' class="%s"' % cls if cls else "",
+                             e(it[key])))
+                a("</dl></div>")
+            for q in p_qs:
+                a('<div class="qa"><div class="w">ask in your next 1:1</div>')
+                a('<div class="q">%s</div>' % e(q.get("question")))
+                if q.get("because"):
+                    a('<div class="b">Why ask: %s</div>' % e(q["because"]))
+                a("</div>")
+            a("</div>")
+        elif narr.get("insights"):
+            # Narrative exists but named nobody here. Say so explicitly:
+            # a silently empty section reads as "nothing to discuss", and
+            # absence of a flagged pattern is not a finding either way.
+            a('<div class="banner low"><b>no cohort-level insight named this '
+              'person</b>The detectors found no cross-cutting pattern involving '
+              'them. That is not a positive or a negative signal &mdash; it '
+              'usually means their data sat inside the normal range on every '
+              'axis the detectors look at.</div>')
 
         # KPIs
         a('<div class="kpis">')

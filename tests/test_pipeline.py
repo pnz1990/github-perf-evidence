@@ -935,6 +935,241 @@ def test_empty_and_degenerate_inputs():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def add_second_person(d, login="devtwo"):
+    """Clone the fixture person into a second roster entry.
+
+    Needed because per-person insight filtering is only meaningfully tested
+    with two people: one insight must appear on one tab and NOT the other.
+    A single-person fixture would pass a filter that ignored `who` entirely.
+    """
+    b = json.load(open(os.path.join(d, "devone.json")))
+    b["person"] = {"github_login": login, "id": login, "name": "Dev Two",
+                   "team": "Platform", "level": "mid",
+                   "identity_evidence": "Directory lists this handle."}
+    json.dump(b, open(os.path.join(d, "%s.json" % login), "w"))
+    rp = os.path.join(d, "roster.json")
+    r = json.load(open(rp))
+    r["people"].append({"github_login": login, "id": login, "name": "Dev Two",
+                        "team": "Platform", "level": "mid",
+                        "identity_evidence": "Directory lists this handle."})
+    json.dump(r, open(rp, "w"))
+
+
+def test_person_insights_precede_the_numbers():
+    """Per-person insights must render on the person's own tab, ABOVE the KPI
+    strip, and a team-level finding must stay labelled as the manager's to fix.
+
+    Regression guard: the first version filtered by `who` but rendered after the
+    KPIs, which put a raw line count above the caveat that explains why it is
+    misleading. Ordering is the feature, not a detail."""
+    print("\n[report] per-person insights render above the KPIs")
+    d = make_fixture(tempfile.mkdtemp())
+    add_second_person(d)
+    run(["classify.py", "--outdir", d], classify)
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+    try:
+        build.subprocess.run = lambda a, **k: (
+            R(1, "") if "contents" in " ".join(a)
+            else R(0, json.dumps({"fork": False, "parent": None, "stars": 10,
+                                  "owner": "acme"})))
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01"], build)
+    finally:
+        build.subprocess.run = real
+
+    run(["insights.py", "--outdir", d], insights)
+    narr = os.path.join(d, "n.json")
+    json.dump({"insights": [
+        {"title": "Individual thing", "audience": "individual",
+         "who": ["devone"], "severity": "high", "confidence": "high",
+         "finding": "F1", "why_missed": "W1", "action": "A1",
+         "caveat": "CAVEAT-ONE"},
+        {"title": "Shared toil", "audience": "team",
+         "who": ["devone", "devtwo"], "severity": "medium",
+         "confidence": "medium", "finding": "F2", "why_missed": "W2",
+         "action": "A2", "caveat": "C2"}],
+        "questions_for_1on1s": [{"who": "devone", "question": "ASK-DEVONE?",
+                                 "because": "B"}],
+        "do_not_conclude": ["X"]}, open(narr, "w"))
+    run(["insights.py", "--outdir", d, "--load", narr], insights)
+    run(["report.py", "--outdir", d], report)
+    h = open(os.path.join(d, "report.html"), encoding="utf-8").read()
+
+    import re as _re
+    m = _re.search(r'<div class="view" id="v-devone">(.*?)'
+                   r'(?=<div class="view" id="v-|</div><script)', h, _re.S)
+    check("devone person view found", m is not None)
+    if m:
+        body = m.group(1)
+        i_ins = body.find("What stands out for")
+        i_kpi = body.find('class="kpis"')
+        check("per-person insight section present", i_ins >= 0)
+        # Ordering within the section: at equal-or-higher severity the finding
+        # ABOUT the person must precede the team-wide one that merely names
+        # them. Here the individual insight is high and the team one medium.
+        check("individual finding precedes the team-wide one",
+              body.find("Individual thing") < body.find("Shared toil"))
+        check("individual and team counts reported separately",
+              "1 about them" in body and "1 team-wide" in body)
+        check("insights render ABOVE the KPI strip",
+              0 <= i_ins < i_kpi, "ins=%d kpi=%d" % (i_ins, i_kpi))
+        eq("both insights naming devone appear on their tab",
+           body.count('<div class="ins '), 2)
+        check("caveat travels with the insight", "CAVEAT-ONE" in body)
+        check("team-level finding stays labelled as the manager's",
+              "the manager&#x27;s to fix" in body or
+              "the manager's to fix" in body)
+        check("co-named person is cross-referenced", "also:" in body)
+        check("their 1:1 question is on their tab", "ASK-DEVONE?" in body)
+
+    m2 = _re.search(r'<div class="view" id="v-devtwo">(.*?)'
+                    r'(?=<div class="view" id="v-|</div><script)', h, _re.S)
+    check("devtwo person view found", m2 is not None)
+    if m2:
+        body2 = m2.group(1)
+        eq("devtwo gets only the insight naming them",
+           body2.count('<div class="ins '), 1)
+        check("devone's question does not leak onto devtwo's tab",
+              "ASK-DEVONE?" not in body2)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_person_with_no_insight_says_so():
+    """A person nobody flagged must get an explicit "no pattern found" note.
+    An empty section reads as "nothing to discuss", and absence of a flagged
+    pattern is not a finding in either direction."""
+    print("\n[report] unflagged person gets an explicit note")
+    d = make_fixture(tempfile.mkdtemp())
+    add_second_person(d)
+    run(["classify.py", "--outdir", d], classify)
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+    try:
+        build.subprocess.run = lambda a, **k: (
+            R(1, "") if "contents" in " ".join(a)
+            else R(0, json.dumps({"fork": False, "parent": None, "stars": 10,
+                                  "owner": "acme"})))
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01"], build)
+    finally:
+        build.subprocess.run = real
+    run(["insights.py", "--outdir", d], insights)
+    narr = os.path.join(d, "n.json")
+    json.dump({"insights": [{"title": "Only devone", "audience": "individual",
+                             "who": ["devone"], "severity": "low",
+                             "finding": "F", "caveat": "C"}]},
+              open(narr, "w"))
+    run(["insights.py", "--outdir", d, "--load", narr], insights)
+    run(["report.py", "--outdir", d], report)
+    h = open(os.path.join(d, "report.html"), encoding="utf-8").read()
+    check("unflagged person gets an explicit not-a-signal note",
+          "no cohort-level insight named this person" in h)
+    check("and it says absence is not a signal",
+          "not a positive or a negative signal" in h)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_insights_narrative_survives_a_bare_rerun():
+    """Re-running insights.py without --load must NOT discard an attached
+    narrative.
+
+    Real bug: a bare re-run recomputed the detectors and rewrote insights.json
+    from scratch, silently dropping a narrative that cost a full LLM pass over
+    the cohort. report.py then omitted the Insights tab entirely with no
+    warning, and the section simply vanished from a finished report."""
+    print("\n[insights] a bare re-run preserves an attached narrative")
+    d = make_fixture(tempfile.mkdtemp())
+    run(["classify.py", "--outdir", d], classify)
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+    try:
+        build.subprocess.run = lambda a, **k: (
+            R(1, "") if "contents" in " ".join(a)
+            else R(0, json.dumps({"fork": False, "parent": None, "stars": 10,
+                                  "owner": "acme"})))
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01"], build)
+    finally:
+        build.subprocess.run = real
+    run(["insights.py", "--outdir", d], insights)
+    narr = os.path.join(d, "n.json")
+    json.dump({"insights": [{"title": "Keep me", "who": ["devone"],
+                             "severity": "high", "finding": "F",
+                             "caveat": "C"}],
+               "do_not_conclude": ["Y"]}, open(narr, "w"))
+    run(["insights.py", "--outdir", d, "--load", narr], insights)
+    first = json.load(open(os.path.join(d, "insights.json")))
+    eq("narrative attached", len(first["narrative"]["insights"]), 1)
+
+    # The exact sequence that lost the data: recompute with no --load.
+    run(["insights.py", "--outdir", d], insights)
+    after = json.load(open(os.path.join(d, "insights.json")))
+    check("narrative survives a bare re-run",
+          bool((after.get("narrative") or {}).get("insights")))
+    eq("and it is the same narrative",
+       after["narrative"]["insights"][0]["title"], "Keep me")
+    check("detectors were still recomputed", "detectors" in after)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_discover_repo_ordering_and_reviewer_floor():
+    """--max-repos truncates the repo list, so the list must be sorted by last
+    push. Returning API order while telling the user "the most recently pushed"
+    silently drops whichever repos sorted late."""
+    print("\n[discover] repo ordering and review-only contributors")
+    real = discover.gh
+    payload = "\n".join(json.dumps(r) for r in [
+        {"name": "old", "full_name": "o/old", "fork": False,
+         "archived": False, "pushed_at": "2026-02-01T00:00:00Z"},
+        {"name": "new", "full_name": "o/new", "fork": False,
+         "archived": False, "pushed_at": "2026-06-01T00:00:00Z"},
+        {"name": "mid", "full_name": "o/mid", "fork": False,
+         "archived": False, "pushed_at": "2026-04-01T00:00:00Z"},
+        {"name": "forked", "full_name": "o/forked", "fork": True,
+         "archived": False, "pushed_at": "2026-06-02T00:00:00Z"},
+        {"name": "dead", "full_name": "o/dead", "fork": False,
+         "archived": True, "pushed_at": "2026-06-03T00:00:00Z"},
+    ])
+    try:
+        discover.gh = lambda args, **k: payload
+        repos, skipped = discover.list_org_repos("o")
+        eq("most recently pushed first", repos, ["o/new", "o/mid", "o/old"])
+        eq("forks excluded by default", skipped["fork"], 1)
+        eq("archived excluded by default", skipped["archived"], 1)
+
+        repos2, skipped2 = discover.list_org_repos(
+            "o", pushed_since="2026-03-01T00:00:00Z")
+        eq("pushed_since prunes stale repos", repos2, ["o/new", "o/mid"])
+        eq("and reports what it pruned", skipped2["no_push_in_window"], 1)
+
+        # Comment discovery must return the COMMENTER, not a PR author, and
+        # must respect the upper date bound the REST API does not support.
+        cpay = "\n".join(json.dumps(c) for c in [
+            {"login": "reviewer-only", "created": "2026-03-05T00:00:00Z"},
+            {"login": "too-late", "created": "2026-09-01T00:00:00Z"},
+            {"login": "some-bot", "created": "2026-03-06T00:00:00Z"},
+        ])
+        discover.gh = lambda args, **k: cpay
+        found, capped = discover.comment_authors("o/new", "2026-01-01",
+                                                 "2026-06-30")
+        check("review-only contributor discovered", "reviewer-only" in found)
+        check("comment after the window end excluded", "too-late" not in found)
+        check("bot commenter excluded", "some-bot" not in found)
+        check("page cap reported honestly", capped is False)
+    finally:
+        discover.gh = real
+
+
 def main():
     print("=" * 70)
     print("github-perf-evidence offline test suite")
@@ -944,6 +1179,10 @@ def main():
               test_trend_windows_do_not_overlap, test_ownership_timeout_is_bounded,
               test_fetch_retries_transient_and_fails_loud,
               test_insights_detectors, test_report_without_insights_still_builds,
+              test_person_insights_precede_the_numbers,
+              test_person_with_no_insight_says_so,
+              test_insights_narrative_survives_a_bare_rerun,
+              test_discover_repo_ordering_and_reviewer_floor,
               test_comment_defect_classification,
               test_gh_json_type_enforcement, test_repo_meta_degrades,
               test_wrap_never_splits_words, test_yq_escaping,
@@ -952,7 +1191,7 @@ def main():
               test_empty_and_degenerate_inputs):
         try:
             t()
-        except Exception as ex:                  # noqa: BLE001
+        except (Exception, SystemExit) as ex:    # noqa: BLE001
             import traceback
             FAIL.append((t.__name__, repr(ex)))
             print("  FAIL %s raised %r" % (t.__name__, ex))
