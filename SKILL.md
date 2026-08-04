@@ -1,291 +1,189 @@
 ---
 name: github-perf-evidence
-description: Gather defensible performance-review evidence for GitHub users over a date window. Load when asked to summarize what someone shipped, build promo/review packets from GitHub, compare engineers' output, or audit contribution volume. Separates hand-authored code from generated and vendored content, detects fork double-counting, discovers formal ownership roles, and emits caveat-annotated YAML per person plus a cohort comparison index. Use for any "what did <user> do from X to Y" request.
+description: Gather defensible performance-review evidence for GitHub users over a date window. Load when asked to summarize what someone shipped, build promo/review packets from GitHub, compare engineers' output, audit contribution volume, count bugs caught in review, or find team patterns a manager might be missing. Separates hand-authored code from generated and vendored content, detects fork double-counting, discovers formal ownership roles, classifies review comments to count real defects caught, and produces an interactive HTML report. Use for any "what did <user> do from X to Y" request.
 ---
 
 # GitHub Performance-Review Evidence
 
-Produces per-person evidence files that a reviewer (or another agent) can quote
-without accidentally citing an inflated or double-counted number.
+**YOU run this pipeline. The user should never be asked to run a Python command.**
 
-**The core problem this solves:** raw GitHub line counts are wrong, usually by
-2x-30x. Generated code, vendored third-party content, license manifests, and
-fork duplicates all land in `additions`. A naive scan makes a small codegen fix
-look like a 22,000-line contribution. Reviews built on those numbers are
-indefensible the moment someone spot-checks one PR.
+Run every step yourself with Bash. Report findings in chat and hand the user a
+finished HTML report. The only things you ask the user for are decisions you
+cannot make: who is in scope, what date window, and identity confirmation.
+
+## What the user gets
+
+A single interactive `report.html` (no server, no network) plus per-person YAML
+and JSON. Tabs: Cohort, Insights, Rankings, Team risk, and one per person.
+
+## The problem this solves
+
+Raw GitHub line counts are wrong, usually by 2x-30x, always in the flattering
+direction. Generated code, vendored content, license manifests and fork
+duplicates all land in `additions`. A small codegen fix can look like a
+22,000-line contribution. Reviews built on those numbers fall apart the moment
+someone opens one PR.
 
 ## Hard rules
 
-1. **Never cite raw `additions`.** Always classify first, then cite
-   hand-authored volume.
-2. **Verify every classification rule against the actual repo** before
-   trusting it. Read the file header for a codegen marker, read the
-   `generate.sh`, read the vendoring README. Do not pattern-match on a hunch.
-3. **Run the audit step and act on it.** It exists because plausibility
-   checks catch real bugs. Do not skip it because the numbers "look fine."
-4. **One classifier version per cohort.** Comparing people classified
-   differently is a defect, not a nuance. If you fix a rule, re-run
-   *everyone*.
-5. **State what is missing.** For most orgs, public GitHub is a minority of
-   total output. Say so in the output.
-6. **Volume is not impact.** A 10-line fix in a code generator can propagate
-   to 100+ downstream repos. Surface ownership roles and review load
-   alongside line counts, and say plainly that ranking by volume ranks
-   activity.
+1. **Never cite raw `additions`.** Classify first, then cite hand-authored volume.
+2. **Verify every classification rule against the actual repo.** Read the file
+   header for a codegen marker, read the `generate.sh`, read the vendoring
+   README. Never pattern-match on a hunch.
+3. **Run the audit step and act on it.** Do not skip it because numbers "look
+   fine" -- it exists because plausibility checks catch real bugs.
+4. **One classifier version per cohort.** If you fix a rule, re-run *everyone*.
+5. **Volume is not impact.** Surface ownership, review depth and defects caught
+   alongside line counts, and say plainly that volume rankings rank activity.
+6. **Low activity is a question, never a finding.** Most engineering work is
+   invisible here. Say so every time you report.
+7. **Never invent a number.** Every figure you state must come from the tool
+   output. If you did not measure it, do not say it.
 
-## Prerequisites
+## Before you start: two things to ask the user
 
-`gh` CLI authenticated (`gh auth status`). Scripts use only the stdlib, so any
-`python3` works. YAML validation needs `pyyaml` in *some* interpreter; on macOS
-`/usr/bin/python3` usually has it when homebrew python does not.
+Ask these together, once, then proceed without further check-ins:
 
-## Pipeline
+1. **Who and what window?** GitHub logins (or an org to discover from) and dates.
+2. **Any private repos?** Default is public-only. `--visibility all` includes
+   private repos their token can read, and makes the output confidential.
+
+Then **resolve identity yourself** before scanning: check `gh api users/<login>`
+for name and company, and look for a local doc that states the handle. Write what
+you found into `identity_evidence` per person. If a profile has no name and you
+inferred the mapping, say so in the roster AND flag it in your final report --
+the user must confirm before using that file. Never infer pronouns or personal
+attributes from a name; use they/them.
+
+## Working directory
+
+Write output **outside** this skill directory, somewhere the user can find it,
+e.g. `~/perf-review-<window>/`. Add a `.gitignore` containing `*` on the first
+run: the output holds named employees' performance data and must never reach a
+repo.
+
+## Pipeline (you run all of this)
 
 ```bash
 S=~/.claude/skills/github-perf-evidence/scripts
-OUT=/tmp/perf_evidence          # working dir; anything writable
+OUT=~/perf-review-2026-h1     # outside the skill dir
 
-# 0. optional: generate a starter roster instead of writing one by hand
-python3 $S/discover.py  --org myorg --days 180 -o roster.json
-#    then EDIT roster.json: drop non-team-members, fill identity_evidence
+python3 $S/discover.py  --org ORG --days 180 -o $OUT/roster.json   # optional
+#   then EDIT roster.json yourself: drop non-team members, fill identity_evidence
 
-python3 $S/fetch.py     --roster roster.json --outdir $OUT --compare-window
-python3 $S/cache.py     --outdir $OUT --all              # files + commits + review depth
-python3 $S/classify.py  --outdir $OUT --profile kubernetes web   # see --list-profiles
-python3 $S/audit.py     --outdir $OUT                    # ← REVIEW OUTPUT, then loop
-python3 $S/ownership.py --outdir $OUT                    # de-facto owners + bus factor
-python3 $S/build.py     --outdir $OUT --roster roster.json --own-orgs myorg
-
-# insights: detectors, then YOU narrate them (see below)
-python3 $S/insights.py  --outdir $OUT --prompt           # -> answer this
-python3 $S/insights.py  --outdir $OUT --load notes.json  # attach your answer
-
-python3 $S/report.py    --outdir $OUT --open             # interactive HTML
+python3 $S/fetch.py     --roster $OUT/roster.json --outdir $OUT --dry-run
+python3 $S/fetch.py     --roster $OUT/roster.json --outdir $OUT --compare-window
+python3 $S/cache.py     --outdir $OUT --all
+python3 $S/classify.py  --outdir $OUT --profile kubernetes web    # --list-profiles
+python3 $S/audit.py     --outdir $OUT          # READ IT, fix patterns.json, loop
+python3 $S/ownership.py --outdir $OUT
+python3 $S/build.py     --outdir $OUT --roster $OUT/roster.json --own-orgs ORG
+python3 $S/report.py    --outdir $OUT
 ```
 
-## Defects caught in review (`comments.py`)
+**Run the long steps with `run_in_background: true`.** A real 8-person / 7-month
+scan makes ~1,700 unique PR lookups and takes over two hours across `fetch.py`
+and `cache.py`. Poll the output file; do not block the conversation. Tell the
+user up front that it will take hours and that it is resumable.
 
-Counts real defects found in review, attributed to **both** sides. Needs three
-steps because it classifies comment *text*:
+**Order matters.** `fetch.py` rewrites the bundles and clears classification, so
+after any re-fetch you must re-run `classify.py` before `build.py`. `build.py`
+fails with instructions if you forget.
+
+**Everything is resumable.** `cache.py` flushes every 25 PRs and skips what it
+already has. If the user needs to stop, tell them the exact command to re-run --
+nothing is lost and nothing is re-fetched.
+
+**Rate limits are expected**, not exceptional. GitHub's secondary limit triggers
+on sustained request rate even with quota left. Transient 403/429s retry
+automatically; a hard failure raises loudly rather than recording zero. If you
+hit one, wait ~10 minutes and re-run the same command.
+
+## Two steps where YOU are the model
+
+These are the only steps that need an LLM. **You are that LLM** -- do not hand
+the prompt to the user.
+
+### Defects caught in review
 
 ```bash
-python3 $S/comments.py --outdir $OUT --fetch              # cache comment bodies
-python3 $S/comments.py --outdir $OUT --prompt > p.txt      # batched threads
-python3 $S/comments.py --outdir $OUT --load answers.json   # attach + aggregate
+python3 $S/comments.py --outdir $OUT --fetch
+python3 $S/comments.py --outdir $OUT --prompt --limit 250 > $OUT/p.txt
+#   READ p.txt, classify every thread, write your JSON answer to $OUT/answers.json
+python3 $S/comments.py --outdir $OUT --load $OUT/answers.json
 ```
 
-Keywords do not work here. On real PRs, explicit acknowledgements ("good catch",
-"fixed") appear in only 0-2 comments out of 8-30, and no regex separates "this
-over-rejects on non-branch-aware input" (a real bug) from "nit: move this to
-validation.go". Classification has to read the comment.
+Read the threads and classify each as `bug`, `design_flaw`, `correctness_risk`,
+`test_gap`, `style_nit`, `question`, `praise`, `logistics` or `other`, with a
+severity and whether the author acknowledged it. The prompt file states the exact
+schema; follow it exactly, including the thread ids.
 
-Each thread becomes one of: `bug`, `design_flaw`, `correctness_risk`,
-`test_gap`, `style_nit`, `question`, `praise`, `logistics`, `other`, with a
-severity and whether the author acknowledged it.
+Be strict. Err toward the lower category. An inflated defect count is worse than
+a missing one because it lands in someone's performance review.
 
-**Reviewer side** (`defects_caught`, `serious_caught`, `confirmed_by_author`,
-`signal_rate_pct`) is a fair positive signal, bounded by what they were asked to
-review.
+Keywords cannot do this job: on real PRs explicit acknowledgements appear in only
+0-2 comments out of 8-30, and no regex separates a real correctness bug from
+"nit: move this to validation.go".
 
-**Author side** (`review_rigor_received_pct`) is **not a quality score**, and
-you must not present it as one. It rises when someone writes ambitious code,
-posts early for feedback, or has thorough reviewers -- all behaviours you want --
-and falls when work is trivial or rubber-stamped. The finding worth chasing is a
-**low** number on high shipped volume: that usually means nobody reviewed it
-properly, which is a process problem, not a person problem.
+**The author side is not a quality score.** `review_rigor_received` rises with
+ambitious code, early drafts and thorough reviewers; it falls with trivial code
+and rubber-stamping. The only useful reading is the inverse: a *low* number on
+high shipped volume means nobody reviewed it properly, which is a process problem
+the manager owns. Never rank anyone on it, and say this when you report it.
 
-`commentcache.json` holds verbatim engineer-written text. It is far more
-sensitive than any count in this toolchain. Never commit it, never paste it.
+`commentcache.json` holds verbatim text engineers wrote about each other's code.
+It is the most sensitive artifact here. Never paste it into chat wholesale, never
+quote it back at a person.
 
-## Insights: you are the narration layer
+### Insights
 
-`insights.py` is split in two on purpose:
+```bash
+python3 $S/insights.py --outdir $OUT --prompt > $OUT/ip.txt
+#   READ ip.txt, write your JSON answer to $OUT/notes.json
+python3 $S/insights.py --outdir $OUT --load $OUT/notes.json
+python3 $S/report.py   --outdir $OUT       # re-render with insights
+```
 
-- **Detectors** (deterministic) find patterns and emit the numbers. 11 of them:
-  repetitive release toil, work-theme mix, review reciprocity, knowledge silos,
-  review load balance, depth-vs-volume rank disagreement, stalled work,
-  trajectory shifts, external visibility, bus factor, defect catching (if
-  comments.py has run), measurement risk.
-- **Narration** (you) reads that output and writes what the manager should DO.
+Twelve deterministic detectors find the patterns and produce every number:
+release toil, theme mix, review reciprocity, knowledge silos, review load
+balance, depth-vs-volume rank disagreement, stalled work, trajectory shifts,
+external visibility, bus factor, defect catching, measurement risk.
 
-Run `--prompt`, answer it as **strict JSON** matching the schema it prints, save
-to a file, then `--load` it. `report.py` renders it as an Insights tab.
+Your job is to say what the manager should DO. The split exists so you can only
+interpret measured figures -- **never cite a number the detectors did not
+produce.**
 
-**Never invent a number.** The split exists so that every figure in an insight
-traces back to a detector. If you cite something the detectors did not produce,
-the whole section becomes unciteable and the tool is worse than useless.
+When you narrate:
 
-Hold to the prompt's rules when you narrate:
-
-- Prefer insights crossing two or more detectors; single-metric observations are
+- Prefer insights crossing two or more detectors. Single-metric observations are
   already visible in the report tables.
-- Volume is not impact. Never rank people by lines or PR count.
-- Low activity is a question, not a finding.
 - Team-level findings (toil, silos, bus factor, review imbalance) are the
   manager's problems to fix, not individual failings. Frame them that way.
 - Every insight needs a `caveat` saying what would make the reading wrong.
-- they/them for everyone; never infer personal attributes.
+- Never rank people by volume. Never treat low activity as a finding.
 
-**Order matters.** `fetch.py` rewrites the bundles, which clears
-classification, so any re-fetch means re-running `classify.py` before
-`build.py`. `build.py` fails with instructions if you forget.
+## Reporting to the user
 
-**Budget hours, not minutes, for a real cohort.** A measured 8-person /
-7-month scan made ~1,700 unique PRs and took over two hours across `fetch.py`
-and `cache.py`. Run `--dry-run` first for an estimate, then run the long steps
-in the background.
+Lead with what the evidence supports, not the table:
 
-**Every step is resumable.** `cache.py` writes progress every 25 PRs and skips
-anything already cached, so stopping and re-running the identical command
-continues from where it left off. Nothing is re-fetched and nothing is lost.
-Tell the user this rather than making them wait on a foreground command.
+- The standout, and *why* -- ownership roles, defects caught and external merges
+  beat volume.
+- Anyone whose ratio is unusual, and what to **ask** them, not what to conclude.
+- Anything unresolved: identity uncertainty, truncated counts, big open PRs.
+- Then the numbers, with the caveat that they rank activity.
+- Finish with the report path and how to open it.
 
-**Expect rate limiting on large scans.** GitHub's secondary limit triggers on
-sustained request rate even with quota remaining. `fetch.py` retries transient
-403/429s with backoff and paces search calls; a hard failure raises loudly
-rather than recording zero, because "this person did nothing" is the worst
-possible silent error in a performance review.
+Quote `hand_additions_canonical_merged` for volume. Never quote raw additions.
 
-Useful flags:
+## References
 
-| | |
-|---|---|
-| `fetch.py --dry-run` | estimate API calls before committing to a scan |
-| `fetch.py --visibility all` | include private repos (needs `repo` scope). Output becomes CONFIDENTIAL. |
-| `fetch.py --compare-window` | also scan two half-windows to show trajectory |
-| `cache.py --review-depth` | inline comments + verdicts per review (2 calls/PR) |
-| `report.py --open` | write the HTML and open it |
-
-`discover.py` finds who was active so you do not have to know every login.
-It filters bots and leaves `identity_evidence` blank on purpose: it proves a
-login was active, not who the human is.
-
-`--commits` costs one extra API call per PR and buys the single most useful
-section in the output: the commit subjects the person actually authored. Line
-counts say how much; subjects say **what**. Use it.
-
-`--profile` seeds ecosystem-specific classifier rules. The default seed is
-deliberately narrow because a rule that wrongly marks authored code as
-generated silently erases someone's work. `--list-profiles` to see them.
-
-`audit.py` is not optional and not a formality. It prints a ranked list of
-suspicious PRs and the specific files driving them. Work the list:
-
-```bash
-gh api repos/<owner>/<repo>/contents/<path> --jq .content | base64 -d | head -5
-```
-
-If you find a generated or vendored file counted as hand-authored, add the
-pattern to `$OUT/patterns.json` (created by `classify.py` on first run), then
-re-run `classify.py` → `audit.py` for **all** people. `cache.py` means
-reclassification is instant, so iterate freely. Expect 2-4 rounds on a codebase
-you have not scanned before.
-
-Each round, record *why* a pattern was added, with the evidence, in
-`patterns.json`'s `verified` field. That field is copied into the output so a
-reader can check your work.
-
-## Roster
-
-`roster.json` — the only file you write by hand:
-
-```json
-{
-  "window": {"start": "2026-01-01", "end": "2026-08-03"},
-  "people": [
-    {"github_login": "octocat",
-     "id": "ocat",                       // internal alias; filename key
-     "name": "Octo Cat",                 // optional
-     "team": "Platform",                 // optional
-     "level": "senior",                  // optional, free-text
-     "title": "Software Engineer II",    // optional
-     "manager": "mgr-alias",             // optional
-     "identity_evidence": "how login->person was established"
-    }
-  ]
-}
-```
-
-Only `github_login` is required; `id` defaults to the login. Everything else is
-passthrough metadata that appears in the output.
-
-**Resolve identity before scanning.** A GitHub login is not a person. Record how
-you established the mapping in `identity_evidence`. If a profile has no name
-field and you inferred the mapping, say so explicitly — the skill marks that
-`LOW-verify` and a reviewer must confirm before using the file. Never infer
-someone's pronouns or personal details from a name.
-
-## Output
-
-```
-$OUT/
-  COHORT-INDEX.yaml         # comparison table, rankings, cross-cohort caveats
-  <id>-evidence.yaml        # one per person
-  patterns.json             # classifier rules + verification notes
-  audit-report.txt          # last audit run
-  filecache.json            # per-PR file lists (reclassify without refetching)
-  commitcache.json          # per-PR commit subjects (with --commits)
-```
-
-Every file is written twice: `.yaml` for humans and diffs, `.json` for tools.
-`report.py` reads the JSON, so no YAML parser is needed anywhere.
-
-Each person file carries: `summary`, `ownership_roles`, **`review_depth`**,
-**`trajectory`**, **`de_facto_ownership`**, `external_upstream_contributions`,
-`fork_activity`, `collaboration`, `language_mix`, `delivery`,
-`authored_commit_subjects`, `cadence`, `by_repo`, `reviews`,
-`largest_hand_authored`, `open_and_wip`, `issues_opened`, `entries`.
-
-`report.html` is a single self-contained file: no server, no network, no build
-step. Tabs for the cohort, rankings, team risk, and each person. Sortable
-tables, searchable commit subjects, caveats rendered as visible banners.
-
-## Review depth beats review count
-
-`reviews_given` counts PRs. Measured on real data, one reviewer had **52 review
-events and 11 inline comments** while another had **9 events and 50 inline
-comments** — a count-only metric ranks the first 5.8x higher while the second
-was doing the deeper work. Cite `inline_comments_per_reviewed_pr` when you mean
-depth.
-
-## Bus factor is a team finding
-
-`ownership.py` also reports subsystems where one person wrote most of the
-commits. That is a staffing risk you own, not a credit to award or a problem to
-raise with the person. It is the one output here that is about the team rather
-than the individual.
+- `references/classification.md` -- verified pattern table, ecosystem gotchas,
+  how to verify a new rule
+- `references/methodology.md` -- API ceilings, fork double-counting, fairness
+- `ETHICS.md` -- what these numbers do and do not mean. Read before first use.
 
 ## Tests
 
 ```bash
 python3 tests/test_pipeline.py     # 232 assertions, offline, no gh needed
 ```
-
-Point downstream consumers at `COHORT-INDEX.yaml` first.
-
-### Which number to quote
-
-`hand_additions_canonical_merged` — hand-authored, merged, in the canonical
-upstream repo. Most conservative defensible figure. The files also carry
-`hand_additions_total`, `_merged`, `_open`, `_in_forks`, and a dedup estimate;
-`summary.recommended_metric` names the right one.
-
-## Reporting to a human
-
-Lead with what the evidence supports, not the table. Useful shape:
-
-- The standout, and *why* — formal roles and external validation beat volume.
-- Anyone whose ratio is unusual (very high review load, very low volume) and
-  what to ask them, not what to conclude about them.
-- Anything unresolved: identity uncertainty, truncation, big open PRs.
-- Then the numbers, with the caveat that they rank activity.
-
-Low GitHub volume is a **question**, never a finding. The work may live in
-internal code review, on-call, design, or mentoring. Say that.
-
-## References
-
-- `references/classification.md` — the verified pattern table, per-ecosystem
-  gotchas, and how to verify a new rule
-- `references/methodology.md` — search-API ceilings, fork double-counting,
-  review-total truncation, what the numbers cannot tell you

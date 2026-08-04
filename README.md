@@ -116,17 +116,32 @@ raise with the person who happens to be the sole author.
 
 ## Install
 
-**As a Claude Code skill** (recommended):
+### Recommended: as a Claude Code skill
 
 ```bash
 git clone https://github.com/pnz1990/github-perf-evidence.git \
   ~/.claude/skills/github-perf-evidence
 ```
 
-Claude Code discovers it automatically. Ask it *"what did octocat ship from
-January to June?"* and it runs the pipeline and reports back.
+Claude Code discovers it automatically. Then just ask:
 
-**As a standalone pipeline** — clone anywhere and run the scripts directly.
+> *"Run a contribution review for octocat, hubber and mona, January through June."*
+
+Claude runs the whole pipeline itself — including the two steps that need a
+model — and hands you a finished HTML report. **You do not run any Python.** It
+will ask you two things: who is in scope with what dates, and whether to include
+private repos. Everything else it does and reports back.
+
+This matters for the LLM steps in particular: classifying review comments and
+writing insights are things the agent does inline. Running the scripts by hand
+means doing that classification yourself, by reading a few hundred review
+threads.
+
+### Alternative: standalone CLI
+
+Clone anywhere and run the scripts directly. Steps 1-6 and 9 are ordinary
+commands. Steps 7 and 8 emit a prompt you must answer with an LLM yourself and
+feed back in — workable, but this is the path the skill exists to avoid.
 
 ### Requirements
 
@@ -140,10 +155,14 @@ January to June?"* and it runs the pipeline and reports back.
 
 ## Use
 
+> If you installed this as a Claude Code skill, **skip this section** — ask
+> Claude to run the review and it handles all of it. What follows is the manual
+> path for standalone use.
+
 ```bash
 cd ~/.claude/skills/github-perf-evidence
 S=./scripts
-OUT=/tmp/perf_evidence
+OUT=~/perf-review-2026-h1     # NOT inside this repo -- output names real people
 ```
 
 ### 1. Build a roster
@@ -270,7 +289,7 @@ python3 $S/build.py --outdir $OUT --roster roster.json --own-orgs YOUR_ORG
 
 ```bash
 python3 $S/comments.py --outdir $OUT --fetch
-python3 $S/comments.py --outdir $OUT --prompt > p.txt   # answer with an LLM
+python3 $S/comments.py --outdir $OUT --prompt > p.txt   # an LLM answers this
 python3 $S/comments.py --outdir $OUT --load answers.json
 ```
 
@@ -300,8 +319,8 @@ volume — that usually means nobody reviewed it properly. Never rank anyone on 
 
 ```bash
 python3 $S/insights.py --outdir $OUT --prompt > prompt.txt
-#   paste prompt.txt into Claude (or run this whole skill inside Claude Code
-#   and it does this step itself), save the JSON reply as notes.json
+#   an LLM reads prompt.txt and replies with JSON -> save as notes.json
+#   (inside Claude Code the agent does this step itself)
 python3 $S/insights.py --outdir $OUT --load notes.json
 ```
 
