@@ -25,6 +25,29 @@ in or spread the next project. It is not a credit to award and not a problem to
 raise with the person who happens to be the sole author. If you use it to praise
 or criticize an individual you have inverted its purpose.
 
+## The defect-counting metric needs its own warning
+
+`comments.py` counts defects found in review. The **reviewer** side is a fair
+positive signal. The **author** side -- defects found in someone's own code -- is
+the most misusable number this tool produces, because it looks like a quality
+score and is not one.
+
+It goes UP when someone writes ambitious code, posts a draft early for feedback,
+or has thorough reviewers. It goes DOWN when someone writes trivial code, or
+when nobody reviews them properly. Both directions are the opposite of what a
+naive reading suggests.
+
+Use it one way only: a **low** number on high shipped volume means the review
+process is not working on that person's changes. That is your problem to fix, not
+theirs to answer for.
+
+Do not put author-side defect counts in a review document. Do not rank on them.
+Do not show them to the person as a scorecard.
+
+Also: `commentcache.json` holds verbatim comment text your engineers wrote about
+each other's code. It is the most sensitive artifact here. Reading it to
+understand a pattern is fine. Quoting it back at someone in a review is not.
+
 ## Rules of use
 
 1. **Never rank people by line count.** Volume rankings order activity, not

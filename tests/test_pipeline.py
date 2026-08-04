@@ -23,6 +23,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 import audit          # noqa: E402
+import comments       # noqa: E402
 import insights       # noqa: E402
 import build          # noqa: E402
 import classify       # noqa: E402
@@ -761,6 +762,116 @@ def test_report_without_insights_still_builds():
     shutil.rmtree(d, ignore_errors=True)
 
 
+def test_comment_defect_classification():
+    """Defect counting must attribute to the right side and must not let the
+    author-side number read as a quality score."""
+    print("\n[comments] defect attribution, both sides")
+    d = make_fixture(tempfile.mkdtemp())
+    run(["classify.py", "--outdir", d], classify)
+
+    # Two threads on devone's PR: one real bug raised by a peer (acknowledged),
+    # one style nit. Plus one thread where devone is the reviewer.
+    json.dump({
+        "acme/svc#1": [
+            {"who": "devtwo", "id": "10", "reply_to": "0",
+             "path": "pkg/widget/widget.go",
+             "body": "this dereferences before the nil check"},
+            {"who": "devone", "id": "11", "reply_to": "10", "path": "",
+             "body": "good catch, fixed"},
+            {"who": "devtwo", "id": "20", "reply_to": "0", "path": "",
+             "body": "nit: rename to widgetID"},
+        ],
+        "acme/svc#90": [
+            {"who": "devone", "id": "30", "reply_to": "0", "path": "",
+             "body": "this design will not scale past one region"},
+        ],
+    }, open(os.path.join(d, "commentcache.json"), "w"))
+
+    cache = json.load(open(os.path.join(d, "commentcache.json")))
+    th = comments.threads(cache)
+    eq("threads grouped by reply chain", len(th), 3)
+
+    ans = os.path.join(d, "ans.json")
+    json.dump({"classifications": [
+        {"thread": "acme/svc#1::10", "kind": "bug", "severity": "serious",
+         "author_acknowledged": True, "one_line": "nil deref"},
+        {"thread": "acme/svc#1::20", "kind": "style_nit", "severity": "minor",
+         "author_acknowledged": None, "one_line": "rename"},
+        {"thread": "acme/svc#90::30", "kind": "design_flaw",
+         "severity": "moderate", "author_acknowledged": None,
+         "one_line": "single-region design"},
+    ]}, open(ans, "w"))
+
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+    try:
+        build.subprocess.run = lambda a, **k: (
+            R(1, "") if "contents" in " ".join(a)
+            else R(0, json.dumps({"fork": False, "parent": None, "stars": 10,
+                                  "owner": "acme"})))
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01"], build)
+    finally:
+        build.subprocess.run = real
+
+    eq("--load aggregates cleanly",
+       run(["comments.py", "--outdir", d, "--load", ans], comments), 0)
+    ca = json.load(open(os.path.join(d, "comment-analysis.json")))
+    eq("every thread id matched", ca["unmatched_thread_ids"], 0)
+
+    # devone REVIEWED #90 -> gets credit for the design flaw there.
+    rev = ca["as_reviewer"].get("devone")
+    check("reviewer side scored", rev is not None)
+    if rev:
+        eq("design flaw counted as a defect caught", rev["defects_caught"], 1)
+        eq("nit not counted as a defect", rev["breakdown"].get("style_nit", 0), 0)
+
+    # devone AUTHORED #1 -> the bug lands on their author side, not reviewer.
+    au = ca["as_author"].get("devone")
+    check("author side scored", au is not None)
+    if au:
+        eq("defect surfaced in their code", au["defects_found_in_their_code"], 1)
+        eq("serious counted", au["serious_found"], 1)
+        eq("their acknowledgement counted", au["they_acknowledged"], 1)
+        eq("nit tracked separately", au["nits_received"], 1)
+    check("a bug on your own PR is not credited to you as a catch",
+          (rev or {}).get("defects_caught", 0) == 1,
+          "self-credit leaked into the reviewer side")
+
+    # The framing guard is not optional: this number invites misuse.
+    hr = ca.get("how_to_read", {})
+    check("author side carries a not-a-scorecard warning",
+          "NOT a defect-rate scorecard" in hr.get("as_author", ""))
+    check("explicit never-rank instruction present",
+          "Never rank" in hr.get("never", ""))
+
+    # Malformed input must be rejected, not half-loaded.
+    bad = os.path.join(d, "bad.json")
+    open(bad, "w").write("nope")
+    raised = False
+    try:
+        run(["comments.py", "--outdir", d, "--load", bad], comments)
+    except SystemExit:
+        raised = True
+    check("--load rejects non-JSON", raised)
+
+    for who in ("dependabot[bot]", "ack-bot", "k8s-ci-robot"):
+        check("bot comments excluded: %s" % who,
+              bool(comments.BOT_RE.search(who)))
+    check("human comment kept", not comments.BOT_RE.search("devtwo"))
+
+    # And it must surface in the report.
+    run(["report.py", "--outdir", d], report)
+    h = open(os.path.join(d, "report.html"), encoding="utf-8").read()
+    check("defect section rendered", "Defects caught in review" in h)
+    check("author-side warning rendered", "not a quality score" in h)
+    check("cohort table has a defects column", "Defects caught</th>" in h)
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def test_no_variable_shadowing_regression():
     """A real bug: `ext` (a list of PRs) was reassigned to a file-extension
     string inside the language loop, so the external-contributions section
@@ -833,6 +944,7 @@ def main():
               test_trend_windows_do_not_overlap, test_ownership_timeout_is_bounded,
               test_fetch_retries_transient_and_fails_loud,
               test_insights_detectors, test_report_without_insights_still_builds,
+              test_comment_defect_classification,
               test_gh_json_type_enforcement, test_repo_meta_degrades,
               test_wrap_never_splits_words, test_yq_escaping,
               test_html_escaping, test_bar_bounds,

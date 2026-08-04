@@ -9,7 +9,7 @@ shipped over a review period.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-stdlib%20only-green)
-![Tests](https://img.shields.io/badge/tests-210%20offline-brightgreen)
+![Tests](https://img.shields.io/badge/tests-232%20offline-brightgreen)
 
 ---
 
@@ -266,7 +266,37 @@ directory (`--timeout`) and it reports anything it skipped.
 python3 $S/build.py --outdir $OUT --roster roster.json --own-orgs YOUR_ORG
 ```
 
-### 7. Insights (optional, needs an LLM)
+### 7. Defects caught in review (optional, needs an LLM)
+
+```bash
+python3 $S/comments.py --outdir $OUT --fetch
+python3 $S/comments.py --outdir $OUT --prompt > p.txt   # answer with an LLM
+python3 $S/comments.py --outdir $OUT --load answers.json
+```
+
+Counts real defects found in review, from **both sides**: who caught them, and
+whose code is actually getting reviewed.
+
+Keyword matching cannot do this. On real PRs, explicit acknowledgements ("good
+catch", "fixed") show up in only 0-2 comments out of 8-30, and no regex tells
+"this over-rejects on non-branch-aware input" apart from "nit: move this to
+validation.go". Each thread gets classified as `bug`, `design_flaw`,
+`correctness_risk`, `test_gap`, `style_nit`, `question`, `praise`, or
+`logistics`, with a severity and whether the author acknowledged it.
+
+**Reviewer side:** `defects_caught`, `serious_caught`, `confirmed_by_author`, and
+`signal_rate_pct` (share of their threads that raised a real defect rather than a
+nit). A fair positive signal.
+
+**Author side:** `review_rigor_received_pct` is **not a quality score.** It rises
+with ambitious code and thorough reviewers, falls with trivial code and
+rubber-stamping. The finding worth chasing is a *low* number on high shipped
+volume — that usually means nobody reviewed it properly. Never rank anyone on it.
+
+> `commentcache.json` contains verbatim engineer-written text and is the most
+> sensitive artifact this tool produces. It is gitignored. Keep it that way.
+
+### 8. Insights (optional, needs an LLM)
 
 ```bash
 python3 $S/insights.py --outdir $OUT --prompt > prompt.txt
@@ -294,13 +324,14 @@ manager rarely has time to cross-reference:
 | `theme_mix` | What kind of work someone actually does, from commit subjects. |
 | `external_visibility` | Merged PRs to projects your org does not control. |
 | `bus_factor` | Subsystems with one de-facto owner. |
+| `defect_catching` | Who catches real defects, and whose complex work is passing review with nothing raised. |
 | `measurement_risk` | Where the data is too weak to build an insight on. |
 
 The rendered section gives each insight a **Finding**, **Why missed**, **Do
 this**, and **Unless** (what would make the reading wrong), plus suggested 1:1
 questions and an explicit *Do NOT conclude* list.
 
-### 8. Read
+### 9. Read
 
 ```bash
 python3 $S/report.py --outdir $OUT --open
@@ -386,7 +417,7 @@ path-based classification is a heuristic and a good-faith lower bound.
 python3 tests/test_pipeline.py
 ```
 
-210 assertions, fully offline — no network, no `gh`, no pip. Exit code is
+232 assertions, fully offline — no network, no `gh`, no pip. Exit code is
 non-zero on failure so it drops into CI as-is.
 
 Every real bug found while building this has a named regression test: variable
@@ -405,7 +436,7 @@ single classifier rule makes six of them fail — including the one that reports
 | [`ETHICS.md`](ETHICS.md) | what the numbers do and don't mean |
 | [`references/classification.md`](references/classification.md) | verified pattern table, per-ecosystem gotchas, how to verify a new rule |
 | [`references/methodology.md`](references/methodology.md) | API ceilings, fork double-counting, fairness |
-| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 210 offline assertions |
+| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 232 offline assertions |
 
 ## Contributing
 

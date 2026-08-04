@@ -133,6 +133,9 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12.5px
 .qa .q{font-size:14.5px;margin:4px 0 6px}
 .qa .w{font-size:11.5px;color:var(--accent);text-transform:uppercase;letter-spacing:.04em}
 .qa .b{font-size:12.5px;color:var(--faint)}
+.dfx{background:var(--panel2);border:1px solid var(--line);border-radius:7px;
+ padding:9px 12px;margin:6px 0;font-size:13px}
+.dfx .k{font-size:11px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim)}
 .dnc{border-left:4px solid var(--bad);background:var(--panel2);border-radius:8px;
  padding:12px 15px;margin:9px 0;font-size:13.5px}
 """
@@ -198,7 +201,8 @@ def trend_cell(d):
             % (num(d.get("early")), num(d.get("late")), cls, e(ch)))
 
 
-def build_html(idx, people, owners, title, insights=None):
+def build_html(idx, people, owners, title, insights=None,
+               comments=None):
     scan = idx.get("scan", {}) or {}
     rows = idx.get("cohort", []) or []
     H = []
@@ -271,8 +275,8 @@ def build_html(idx, people, owners, title, insights=None):
       'oninput="filt(this,\'t-cohort\')">')
     a('<div class="card" style="overflow-x:auto"><table id="t-cohort"><thead><tr>')
     cols = ["Person", "Team", "Level", "Shipped lines", "PRs merged",
-            "Merge %", "Reviews", "Inline/PR", "Discussion", "Roles",
-            "Ext upstream", "Identity"]
+            "Merge %", "Reviews", "Inline/PR", "Defects caught", "Discussion",
+            "Roles", "Ext upstream", "Identity"]
     for c in cols:
         cl = ' class="n"' if c not in ("Person", "Team", "Level", "Identity") else ""
         a("<th%s onclick=\"sortTable(this)\">%s</th>" % (cl, e(c)))
@@ -298,6 +302,14 @@ def build_html(idx, people, owners, title, insights=None):
         a('<td class="n" data-v="%s">%s</td>'
           % (ipp if ipp is not None else 0,
              e(ipp) if ipp is not None else "&mdash;"))
+        cr = ((comments or {}).get("as_reviewer") or {}).get(str(r.get("id")))
+        dv = (cr or {}).get("defects_caught")
+        a('<td class="n" data-v="%d">%s</td>'
+          % (dv or 0,
+             ('%s%s' % (num(dv), (' <span class="pill bad">%s</span>'
+                                  % num(cr.get("serious_caught")))
+                        if cr.get("serious_caught") else ''))
+             if dv else "&mdash;"))
         a('<td class="n" data-v="%d">%s</td>'
           % (r.get("comment_threads") or 0,
              num(r.get("comment_threads"))))
@@ -388,6 +400,12 @@ def build_html(idx, people, owners, title, insights=None):
               'and the only source of numbers above. Re-run '
               '<code>insights.py</code> to regenerate.</p><table><tbody>')
             for k, v in det.items():
+                if v is None:
+                    # Detector not run (e.g. comment analysis skipped). Say so
+                    # rather than crashing or implying zero findings.
+                    a("<tr><td class=mono>%s</td>"
+                      "<td class=n>not run</td></tr>" % e(k))
+                    continue
                 n = (len(v) if isinstance(v, list)
                      else sum(len(x) for x in v.values()
                               if isinstance(x, list)))
@@ -548,6 +566,65 @@ def build_html(idx, people, owners, title, insights=None):
               '%s%% were substantive.</p>'
               % (num(rdd.get("prs_with_detail")), num(s.get("reviews_given")),
                  e(rdd.get("substantive_pct"))))
+            a("</div>")
+
+        # defects caught / rigor received
+        ca = (comments or {})
+        pid_key = str(m.get("id") or m.get("github_login"))
+        cr = (ca.get("as_reviewer") or {}).get(pid_key)
+        cau = (ca.get("as_author") or {}).get(pid_key)
+        if cr or cau:
+            a('<div class="card"><h3 style="margin-top:0">Defects caught in '
+              'review</h3>')
+            a('<p class="note">From LLM classification of actual review comment '
+              'text, not keyword matching. Sample is capped, so these are '
+              'floors.</p>')
+            if cr:
+                a('<div class="kpis">')
+                for lab, val, hint in (
+                        ("Defects caught", num(cr.get("defects_caught")),
+                         "as a reviewer"),
+                        ("Serious", num(cr.get("serious_caught")),
+                         "would likely have caused an incident"),
+                        ("Confirmed by author", num(cr.get("confirmed_by_author")),
+                         "author agreed it was real"),
+                        ("Signal rate", "%s%%" % e(cr.get("signal_rate_pct")),
+                         "of their threads raised a real defect")):
+                    a('<div class="kpi"><div class="l">%s</div>'
+                      '<div class="v">%s</div><div class="h">%s</div></div>'
+                      % (e(lab), val, hint))
+                a("</div>")
+                bd = cr.get("breakdown") or {}
+                if bd:
+                    a('<p class="note">Raised %s threads in the sampled set: %s</p>'
+                      % (num(cr.get("threads_raised")),
+                         ", ".join("%s %s" % (num(v), e(k.replace("_", " ")))
+                                   for k, v in bd.items())))
+                for ex in (cr.get("examples") or []):
+                    a('<div class="dfx"><span class="k">%s &middot; %s%s</span>'
+                      '<br>%s <span class="note">(%s)</span></div>'
+                      % (e(str(ex.get("kind", "")).replace("_", " ")),
+                         e(ex.get("severity")),
+                         " &middot; confirmed" if ex.get("confirmed") else "",
+                         e(ex.get("summary")), e(ex.get("pr"))))
+            if cau:
+                a('<h4 style="margin:16px 0 6px">Review rigor received on their '
+                  'own PRs</h4>')
+                a('<p class="note"><b>This is not a quality score.</b> It rises '
+                  'when someone writes ambitious code, posts early for feedback, '
+                  'or has thorough reviewers, and falls when work is trivial or '
+                  'rubber-stamped. A LOW number on complex work is the finding '
+                  'worth chasing, because it usually means nobody reviewed it '
+                  'properly. Never rank people on it.</p>')
+                a("<table><tbody>")
+                for lab, key in (("Threads on their PRs", "threads_on_their_prs"),
+                                 ("Defects surfaced", "defects_found_in_their_code"),
+                                 ("Serious", "serious_found"),
+                                 ("They acknowledged", "they_acknowledged"),
+                                 ("Style nits", "nits_received")):
+                    a("<tr><td>%s</td><td class=n>%s</td></tr>"
+                      % (e(lab), num(cau.get(key))))
+                a("</tbody></table>")
             a("</div>")
 
         # trajectory
@@ -731,8 +808,15 @@ def main():
     if insights and not (insights.get("narrative") or {}).get("insights"):
         print("note: insights.json has detector output but no narrative yet -- "
               "run insights.py --prompt, answer it, then --load it")
+    capath = os.path.join(a.outdir, "comment-analysis.json")
+    comments = (json.load(open(capath, encoding="utf-8"))
+                if os.path.exists(capath) else None)
+    if comments:
+        print("defect analysis available (%d reviewers, %d authors)"
+              % (len(comments.get("as_reviewer") or {}),
+                 len(comments.get("as_author") or {})))
     open(out, "w", encoding="utf-8").write(
-        build_html(idx, people, owners, a.title, insights))
+        build_html(idx, people, owners, a.title, insights, comments))
     print("wrote %s  (%d people, %.0f KB)"
           % (out, len(people), os.path.getsize(out) / 1024.0))
     print("open it:  open %s" % out)

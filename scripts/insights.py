@@ -287,6 +287,44 @@ def d_external_visibility(people):
     return sorted(out, key=lambda x: -x["merged_external_prs"])
 
 
+def d_defect_catching(outdir, people):
+    """Who catches real defects, and whose code is actually getting reviewed.
+
+    Two findings a manager cannot get any other way:
+      - a reviewer whose threads are mostly real defects vs mostly nits
+      - an author whose complex work is passing review with nothing raised,
+        which usually means nobody read it properly
+    """
+    path = os.path.join(outdir, "comment-analysis.json")
+    if not os.path.exists(path):
+        return None
+    ca = json.load(open(path))
+    rev = ca.get("as_reviewer") or {}
+    auth = ca.get("as_author") or {}
+    out = {"note": ("LLM-classified from real review comment text. Sample is "
+                    "capped, so all counts are FLOORS, not totals."),
+           "reviewers": [], "authors": [], "unreviewed_risk": []}
+    for pid, v in sorted(rev.items(), key=lambda x: -x[1]["defects_caught"]):
+        out["reviewers"].append(dict(v, id=pid))
+    for pid, v in auth.items():
+        out["authors"].append(dict(v, id=pid))
+        # Substantive volume, nothing raised -> likely unreviewed, not flawless.
+        p = people.get(pid)
+        shipped = (p or {}).get("summary", {}).get(
+            "hand_additions_canonical_merged") or 0
+        if (v["threads_on_their_prs"] >= 2
+                and v["defects_found_in_their_code"] == 0 and shipped >= 3000):
+            out["unreviewed_risk"].append({
+                "id": pid, "shipped_lines": shipped,
+                "threads_on_their_prs": v["threads_on_their_prs"],
+                "defects_surfaced": 0,
+                "why_it_matters": (
+                    "Substantial merged volume with no defect raised in review. "
+                    "The likely explanation is thin review, not flawless code. "
+                    "Check who is reviewing them.")})
+    return out
+
+
 def d_measurement_risk(people, idx):
     """Where the DATA is weakest. An insight built on a truncated count is worse
     than no insight, so this is surfaced alongside the findings."""
@@ -333,6 +371,7 @@ def compute(outdir):
             "trajectory_shifts": d_trajectory_shifts(people),
             "external_visibility": d_external_visibility(people),
             "bus_factor": (owners or {}).get("bus_factor_risk", [])[:10],
+            "defect_catching": d_defect_catching(outdir, people),
             "measurement_risk": d_measurement_risk(people, idx),
         },
     }
@@ -384,6 +423,13 @@ Rules, all of them load-bearing:
   that way.
 - If a person's data carries a measurement risk, either say so in the caveat or
   leave them out.
+- The defect_catching detector (if present) is LLM-classified from real review
+  comment text and its counts are FLOORS from a capped sample. On the reviewer
+  side, defects_caught is a fair positive signal. On the author side,
+  defects_found_in_their_code is NOT a quality score: it rises with ambitious
+  code and thorough reviewers and falls with trivial code and rubber-stamping.
+  A LOW number on high shipped volume means thin review, and that is the
+  manager's problem to fix. Never rank anyone on the author-side number.
 - 5 to 9 insights. Fewer, sharper beats more.
 - Use they/them for everyone. Never infer gender or any personal attribute.
 - Write plainly. No corporate filler, no praise sandwiches.
@@ -435,6 +481,9 @@ def main():
     print("wrote %s" % path)
     print("\ndetector summary:")
     for k, v in d.items():
+        if v is None:
+            print("  %-22s (not run -- see comments.py)" % k)
+            continue
         n = len(v) if isinstance(v, list) else sum(
             len(x) for x in v.values() if isinstance(x, list))
         print("  %-22s %d finding(s)" % (k, n))

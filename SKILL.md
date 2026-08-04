@@ -63,6 +63,40 @@ python3 $S/insights.py  --outdir $OUT --load notes.json  # attach your answer
 python3 $S/report.py    --outdir $OUT --open             # interactive HTML
 ```
 
+## Defects caught in review (`comments.py`)
+
+Counts real defects found in review, attributed to **both** sides. Needs three
+steps because it classifies comment *text*:
+
+```bash
+python3 $S/comments.py --outdir $OUT --fetch              # cache comment bodies
+python3 $S/comments.py --outdir $OUT --prompt > p.txt      # batched threads
+python3 $S/comments.py --outdir $OUT --load answers.json   # attach + aggregate
+```
+
+Keywords do not work here. On real PRs, explicit acknowledgements ("good catch",
+"fixed") appear in only 0-2 comments out of 8-30, and no regex separates "this
+over-rejects on non-branch-aware input" (a real bug) from "nit: move this to
+validation.go". Classification has to read the comment.
+
+Each thread becomes one of: `bug`, `design_flaw`, `correctness_risk`,
+`test_gap`, `style_nit`, `question`, `praise`, `logistics`, `other`, with a
+severity and whether the author acknowledged it.
+
+**Reviewer side** (`defects_caught`, `serious_caught`, `confirmed_by_author`,
+`signal_rate_pct`) is a fair positive signal, bounded by what they were asked to
+review.
+
+**Author side** (`review_rigor_received_pct`) is **not a quality score**, and
+you must not present it as one. It rises when someone writes ambitious code,
+posts early for feedback, or has thorough reviewers -- all behaviours you want --
+and falls when work is trivial or rubber-stamped. The finding worth chasing is a
+**low** number on high shipped volume: that usually means nobody reviewed it
+properly, which is a process problem, not a person problem.
+
+`commentcache.json` holds verbatim engineer-written text. It is far more
+sensitive than any count in this toolchain. Never commit it, never paste it.
+
 ## Insights: you are the narration layer
 
 `insights.py` is split in two on purpose:
@@ -70,7 +104,8 @@ python3 $S/report.py    --outdir $OUT --open             # interactive HTML
 - **Detectors** (deterministic) find patterns and emit the numbers. 11 of them:
   repetitive release toil, work-theme mix, review reciprocity, knowledge silos,
   review load balance, depth-vs-volume rank disagreement, stalled work,
-  trajectory shifts, external visibility, bus factor, measurement risk.
+  trajectory shifts, external visibility, bus factor, defect catching (if
+  comments.py has run), measurement risk.
 - **Narration** (you) reads that output and writes what the manager should DO.
 
 Run `--prompt`, answer it as **strict JSON** matching the schema it prints, save
@@ -223,7 +258,7 @@ than the individual.
 ## Tests
 
 ```bash
-python3 tests/test_pipeline.py     # 210 assertions, offline, no gh needed
+python3 tests/test_pipeline.py     # 232 assertions, offline, no gh needed
 ```
 
 Point downstream consumers at `COHORT-INDEX.yaml` first.
