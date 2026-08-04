@@ -14,4 +14,8 @@ audit-report.txt
 *-evidence.json
 COHORT-INDEX.yaml
 COHORT-INDEX.json
+insights.json
+llm-insights.json
+notes.json
+prompt.txt
 report.html

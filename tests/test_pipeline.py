@@ -23,6 +23,7 @@ SCRIPTS = os.path.join(os.path.dirname(HERE), "scripts")
 sys.path.insert(0, SCRIPTS)
 
 import audit          # noqa: E402
+import insights       # noqa: E402
 import build          # noqa: E402
 import classify       # noqa: E402
 import discover       # noqa: E402
@@ -620,6 +621,146 @@ def test_fetch_retries_transient_and_fails_loud():
           "pace %s would exceed the limit" % fetch.SEARCH_PACE)
 
 
+def test_insights_detectors():
+    """Detectors must be deterministic and must never fabricate. Every number an
+    insight cites has to trace back to detector output, which is why the LLM
+    layer is separated from this one."""
+    print("\n[insights] detectors run over fixtures")
+    d = make_fixture(tempfile.mkdtemp())
+    run(["classify.py", "--outdir", d], classify)
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+
+    def fake(args, **kw):
+        j = " ".join(args)
+        if "contents" in j:
+            return R(1, "")
+        if "repos/someone/svc-fork" in j:
+            return R(0, json.dumps({"fork": True, "parent": "acme/svc",
+                                    "stars": 0, "owner": "someone"}))
+        if "repos/" in j:
+            return R(0, json.dumps({"fork": False, "parent": None,
+                                    "stars": 4200, "owner": "acme"}))
+        return R(1, "")
+    try:
+        build.subprocess.run = fake
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01",
+             "--own-orgs", "acme"], build)
+    finally:
+        build.subprocess.run = real
+
+    rc = run(["insights.py", "--outdir", d], insights)
+    eq("insights exits clean", rc, 0)
+    data = json.load(open(os.path.join(d, "insights.json")))
+    for k in ("release_toil", "theme_mix", "review_reciprocity",
+              "knowledge_silos", "review_load_balance", "depth_vs_volume",
+              "stalled_work", "trajectory_shifts", "external_visibility",
+              "measurement_risk"):
+        check("detector present: %s" % k, k in data["detectors"])
+    check("no narrative until one is loaded", "narrative" not in data)
+
+    # Determinism: same input, same output.
+    run(["insights.py", "--outdir", d], insights)
+    again = json.load(open(os.path.join(d, "insights.json")))
+    eq("detectors are deterministic", json.dumps(data["detectors"], sort_keys=True),
+       json.dumps(again["detectors"], sort_keys=True))
+
+    # Bots must not be counted as collaborators -- a release bot can dominate
+    # someone's thread count and make automation look like mentoring.
+    for who in ("dependabot[bot]", "ack-bot", "k8s-ci-robot", "renovate[bot]"):
+        check("bot excluded from reciprocity: %s" % who,
+              bool(insights.BOT_RE.search(who)))
+    for who in ("devuser", "talbot", "a-person"):
+        check("human kept in reciprocity: %s" % who,
+              not insights.BOT_RE.search(who))
+
+    # --load must reject junk rather than shipping a broken section.
+    bad = os.path.join(d, "bad.json")
+    open(bad, "w").write("this is not json")
+    raised = False
+    try:
+        run(["insights.py", "--outdir", d, "--load", bad], insights)
+    except SystemExit:
+        raised = True
+    check("--load rejects non-JSON", raised)
+
+    open(bad, "w").write('{"insights": []}')
+    raised = False
+    try:
+        run(["insights.py", "--outdir", d, "--load", bad], insights)
+    except SystemExit:
+        raised = True
+    check("--load rejects an empty insights array", raised)
+
+    # A valid narrative attaches and survives a round trip.
+    good = os.path.join(d, "good.json")
+    json.dump({"insights": [{"title": "T", "audience": "team", "who": ["devone"],
+                             "severity": "high", "confidence": "medium",
+                             "finding": "F", "why_missed": "W",
+                             "action": "A", "caveat": "C"}],
+               "questions_for_1on1s": [{"who": "devone", "question": "Q?",
+                                        "because": "B"}],
+               "do_not_conclude": ["X"]}, open(good, "w"))
+    eq("--load accepts valid narrative",
+       run(["insights.py", "--outdir", d, "--load", good], insights), 0)
+    loaded = json.load(open(os.path.join(d, "insights.json")))
+    eq("narrative attached", len(loaded["narrative"]["insights"]), 1)
+    check("detectors preserved alongside narrative", "detectors" in loaded)
+
+    # Fenced code blocks are the normal shape of an LLM reply.
+    open(bad, "w").write('```json\n{"insights":[{"title":"Z","finding":"f"}]}\n```')
+    eq("--load tolerates ``` fences",
+       run(["insights.py", "--outdir", d, "--load", bad], insights), 0)
+
+    # Restore the full narrative -- the fence fixture above is intentionally
+    # minimal, and the HTML assertions below need the complete shape.
+    run(["insights.py", "--outdir", d, "--load", good], insights)
+
+    # And it must reach the HTML.
+    run(["report.py", "--outdir", d], report)
+    h = open(os.path.join(d, "report.html"), encoding="utf-8").read()
+    check("insights tab rendered", 'id="v-insights"' in h)
+    check("insight card rendered", 'class="ins ' in h)
+    check("caveat rendered as 'Unless'", "Unless" in h)
+    check("1:1 question rendered", 'class="qa"' in h)
+    check("do-not-conclude rendered", 'class="dnc"' in h)
+    check("judgement-vs-measurement warning present",
+          "numbers are measured" in h)
+    shutil.rmtree(d, ignore_errors=True)
+
+
+def test_report_without_insights_still_builds():
+    """The insights section is optional. A report with no insights.json must
+    still render every other tab."""
+    print("\n[insights] report degrades gracefully with no narrative")
+    d = make_fixture(tempfile.mkdtemp())
+    run(["classify.py", "--outdir", d], classify)
+    real = build.subprocess.run
+
+    class R:
+        def __init__(self, rc, out=""):
+            self.returncode, self.stdout = rc, out
+    try:
+        build.subprocess.run = lambda a, **k: (
+            R(1, "") if "contents" in " ".join(a)
+            else R(0, json.dumps({"fork": False, "parent": None, "stars": 10,
+                                  "owner": "acme"})))
+        run(["build.py", "--outdir", d, "--roster",
+             os.path.join(d, "roster.json"), "--scan-date", "2026-07-01"], build)
+    finally:
+        build.subprocess.run = real
+    run(["report.py", "--outdir", d], report)
+    h = open(os.path.join(d, "report.html"), encoding="utf-8").read()
+    check("no insights tab when absent", 'id="v-insights"' not in h)
+    check("cohort tab still present", 'id="v-cohort"' in h)
+    check("person tab still present", "Dev One" in h)
+    shutil.rmtree(d, ignore_errors=True)
+
+
 def test_no_variable_shadowing_regression():
     """A real bug: `ext` (a list of PRs) was reassigned to a file-extension
     string inside the language loop, so the external-contributions section
@@ -691,6 +832,7 @@ def main():
               test_stale_pipeline_guard, test_review_depth_keys_match_report,
               test_trend_windows_do_not_overlap, test_ownership_timeout_is_bounded,
               test_fetch_retries_transient_and_fails_loud,
+              test_insights_detectors, test_report_without_insights_still_builds,
               test_gh_json_type_enforcement, test_repo_meta_degrades,
               test_wrap_never_splits_words, test_yq_escaping,
               test_html_escaping, test_bar_bounds,

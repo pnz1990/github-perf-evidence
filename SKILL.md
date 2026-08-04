@@ -55,8 +55,41 @@ python3 $S/classify.py  --outdir $OUT --profile kubernetes web   # see --list-pr
 python3 $S/audit.py     --outdir $OUT                    # ← REVIEW OUTPUT, then loop
 python3 $S/ownership.py --outdir $OUT                    # de-facto owners + bus factor
 python3 $S/build.py     --outdir $OUT --roster roster.json --own-orgs myorg
+
+# insights: detectors, then YOU narrate them (see below)
+python3 $S/insights.py  --outdir $OUT --prompt           # -> answer this
+python3 $S/insights.py  --outdir $OUT --load notes.json  # attach your answer
+
 python3 $S/report.py    --outdir $OUT --open             # interactive HTML
 ```
+
+## Insights: you are the narration layer
+
+`insights.py` is split in two on purpose:
+
+- **Detectors** (deterministic) find patterns and emit the numbers. 11 of them:
+  repetitive release toil, work-theme mix, review reciprocity, knowledge silos,
+  review load balance, depth-vs-volume rank disagreement, stalled work,
+  trajectory shifts, external visibility, bus factor, measurement risk.
+- **Narration** (you) reads that output and writes what the manager should DO.
+
+Run `--prompt`, answer it as **strict JSON** matching the schema it prints, save
+to a file, then `--load` it. `report.py` renders it as an Insights tab.
+
+**Never invent a number.** The split exists so that every figure in an insight
+traces back to a detector. If you cite something the detectors did not produce,
+the whole section becomes unciteable and the tool is worse than useless.
+
+Hold to the prompt's rules when you narrate:
+
+- Prefer insights crossing two or more detectors; single-metric observations are
+  already visible in the report tables.
+- Volume is not impact. Never rank people by lines or PR count.
+- Low activity is a question, not a finding.
+- Team-level findings (toil, silos, bus factor, review imbalance) are the
+  manager's problems to fix, not individual failings. Frame them that way.
+- Every insight needs a `caveat` saying what would make the reading wrong.
+- they/them for everyone; never infer personal attributes.
 
 **Order matters.** `fetch.py` rewrites the bundles, which clears
 classification, so any re-fetch means re-running `classify.py` before
@@ -190,7 +223,7 @@ than the individual.
 ## Tests
 
 ```bash
-python3 tests/test_pipeline.py     # 175 assertions, offline, no gh needed
+python3 tests/test_pipeline.py     # 210 assertions, offline, no gh needed
 ```
 
 Point downstream consumers at `COHORT-INDEX.yaml` first.

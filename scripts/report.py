@@ -115,6 +115,26 @@ code{background:var(--panel2);padding:1px 5px;border-radius:4px;font-size:12.5px
 .hdr{display:flex;justify-content:space-between;align-items:baseline;gap:14px;flex-wrap:wrap}
 .chip{font-size:11.5px;color:var(--dim);background:var(--panel2);padding:3px 9px;
  border-radius:6px;border:1px solid var(--line)}
+.ins{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--accent);
+ border-radius:10px;padding:15px 17px;margin:13px 0}
+.ins.high{border-left-color:var(--bad)}
+.ins.medium{border-left-color:var(--warn)}
+.ins.low{border-left-color:var(--faint)}
+.ins h4{margin:0 0 9px;font-size:16.5px;line-height:1.35}
+.ins .meta{margin-bottom:10px}
+.ins dl{margin:0;display:grid;grid-template-columns:118px 1fr;gap:6px 13px;font-size:13.5px}
+.ins dt{color:var(--dim);font-size:11.5px;text-transform:uppercase;letter-spacing:.03em;
+ padding-top:2px}
+.ins dd{margin:0}
+.ins dd.act{color:var(--good);font-weight:500}
+.ins dd.cav{color:var(--faint);font-size:12.5px}
+.qa{background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+ padding:12px 14px;margin:9px 0}
+.qa .q{font-size:14.5px;margin:4px 0 6px}
+.qa .w{font-size:11.5px;color:var(--accent);text-transform:uppercase;letter-spacing:.04em}
+.qa .b{font-size:12.5px;color:var(--faint)}
+.dnc{border-left:4px solid var(--bad);background:var(--panel2);border-radius:8px;
+ padding:12px 15px;margin:9px 0;font-size:13.5px}
 """
 
 JS = """
@@ -178,7 +198,7 @@ def trend_cell(d):
             % (num(d.get("early")), num(d.get("late")), cls, e(ch)))
 
 
-def build_html(idx, people, owners, title):
+def build_html(idx, people, owners, title, insights=None):
     scan = idx.get("scan", {}) or {}
     rows = idx.get("cohort", []) or []
     H = []
@@ -216,6 +236,12 @@ def build_html(idx, people, owners, title):
     a('<div class="tabs">')
     a('<div class="tab on" data-v="v-cohort" onclick="show(\'v-cohort\',this)">Cohort</div>')
     a('<div class="tab" data-v="v-rank" onclick="show(\'v-rank\',this)">Rankings</div>')
+    narr = (insights or {}).get("narrative") or {}
+    if narr.get("insights"):
+        a('<div class="tab" data-v="v-insights" onclick="show(\'v-insights\',this)">'
+          'Insights <span class="pill warn">%d</span></div>'
+          % len(narr["insights"]))
+
     risk_rows = (owners or {}).get("bus_factor_risk") or idx.get("bus_factor_risk") or []
     if risk_rows:
         a('<div class="tab" data-v="v-risk" onclick="show(\'v-risk\',this)">'
@@ -292,6 +318,83 @@ def build_html(idx, people, owners, title):
     for n in idx.get("cross_cohort_notes", []) or []:
         a(caveat_html(n))
     a("</div>")
+
+    # ================= INSIGHTS =================
+    if narr.get("insights"):
+        a('<div class="view" id="v-insights">')
+        a('<div class="banner high"><b>how to read this section</b>'
+          'Every number below was computed by a deterministic detector over the '
+          'same data in the other tabs, then interpreted. The <b>numbers are '
+          'measured; the reading is judgement</b> and can be wrong. Each item '
+          'carries what would make it wrong -- read that before acting. '
+          'Team-level findings are the manager\'s to fix, not the individual\'s '
+          'to answer for.</div>')
+
+        order = {"high": 0, "medium": 1, "low": 2}
+        for it in sorted(narr["insights"],
+                         key=lambda x: order.get(str(x.get("severity")), 3)):
+            sev = str(it.get("severity", "low"))
+            a('<div class="ins %s">' % e(sev))
+            a("<h4>%s</h4>" % e(it.get("title")))
+            a('<div class="meta">')
+            a('<span class="pill %s">%s</span>'
+              % ("bad" if sev == "high" else "warn" if sev == "medium" else "",
+                 e(sev)))
+            a('<span class="pill">%s</span>' % e(it.get("audience", "")))
+            conf = str(it.get("confidence", ""))
+            if conf:
+                a('<span class="pill %s">confidence: %s</span>'
+                  % ("ok" if conf == "high" else "warn" if conf == "medium"
+                     else "bad", e(conf)))
+            for w in (it.get("who") or []):
+                a('<span class="pill">%s</span>' % e(w))
+            a("</div>")
+            a("<dl>")
+            for label, key, cls in (("Finding", "finding", ""),
+                                    ("Why missed", "why_missed", ""),
+                                    ("Do this", "action", "act"),
+                                    ("Unless", "caveat", "cav")):
+                if it.get(key):
+                    a("<dt>%s</dt><dd%s>%s</dd>"
+                      % (e(label), ' class="%s"' % cls if cls else "",
+                         e(it[key])))
+            a("</dl></div>")
+
+        qs = narr.get("questions_for_1on1s") or []
+        if qs:
+            a("<h3>Questions for your next 1:1s</h3>")
+            a('<p class="note">Phrased to open a conversation rather than '
+              'deliver a verdict. The data cannot tell you the answer.</p>')
+            for q in qs:
+                a('<div class="qa"><div class="w">%s</div>' % e(q.get("who")))
+                a('<div class="q">%s</div>' % e(q.get("question")))
+                if q.get("because"):
+                    a('<div class="b">Why ask: %s</div>' % e(q["because"]))
+                a("</div>")
+
+        dnc = narr.get("do_not_conclude") or []
+        if dnc:
+            a("<h3>Do NOT conclude</h3>")
+            a('<p class="note">Readings this data does not support. Worth '
+              'reviewing before a calibration conversation.</p>')
+            for x in dnc:
+                a('<div class="dnc">%s</div>' % e(x))
+
+        det = (insights or {}).get("detectors") or {}
+        if det:
+            a("<details><summary>Detector output these insights were "
+              "derived from (%d detectors)</summary>" % len(det))
+            a('<div class="card"><p class="note">Deterministic, reproducible, '
+              'and the only source of numbers above. Re-run '
+              '<code>insights.py</code> to regenerate.</p><table><tbody>')
+            for k, v in det.items():
+                n = (len(v) if isinstance(v, list)
+                     else sum(len(x) for x in v.values()
+                              if isinstance(x, list)))
+                a("<tr><td class=mono>%s</td><td class=n>%d finding(s)</td></tr>"
+                  % (e(k), n))
+            a("</tbody></table></div></details>")
+        a("</div>")
 
     # ================= RANKINGS =================
     a('<div class="view" id="v-rank">')
@@ -623,7 +726,13 @@ def main():
     owners = json.load(open(opath)) if os.path.exists(opath) else None
 
     out = a.output or os.path.join(a.outdir, "report.html")
-    open(out, "w", encoding="utf-8").write(build_html(idx, people, owners, a.title))
+    ipath = os.path.join(a.outdir, "insights.json")
+    insights = json.load(open(ipath, encoding="utf-8")) if os.path.exists(ipath) else None
+    if insights and not (insights.get("narrative") or {}).get("insights"):
+        print("note: insights.json has detector output but no narrative yet -- "
+              "run insights.py --prompt, answer it, then --load it")
+    open(out, "w", encoding="utf-8").write(
+        build_html(idx, people, owners, a.title, insights))
     print("wrote %s  (%d people, %.0f KB)"
           % (out, len(people), os.path.getsize(out) / 1024.0))
     print("open it:  open %s" % out)

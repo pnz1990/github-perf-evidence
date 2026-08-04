@@ -9,7 +9,7 @@ shipped over a review period.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-stdlib%20only-green)
-![Tests](https://img.shields.io/badge/tests-175%20offline-brightgreen)
+![Tests](https://img.shields.io/badge/tests-210%20offline-brightgreen)
 
 ---
 
@@ -260,10 +260,49 @@ python3 $S/ownership.py --outdir $OUT
 De-facto ownership per subsystem, plus the bus-factor risk table. Bounded per
 directory (`--timeout`) and it reports anything it skipped.
 
-### 6. Build and read
+### 6. Build
 
 ```bash
-python3 $S/build.py  --outdir $OUT --roster roster.json --own-orgs YOUR_ORG
+python3 $S/build.py --outdir $OUT --roster roster.json --own-orgs YOUR_ORG
+```
+
+### 7. Insights (optional, needs an LLM)
+
+```bash
+python3 $S/insights.py --outdir $OUT --prompt > prompt.txt
+#   paste prompt.txt into Claude (or run this whole skill inside Claude Code
+#   and it does this step itself), save the JSON reply as notes.json
+python3 $S/insights.py --outdir $OUT --load notes.json
+```
+
+Eleven deterministic detectors look for patterns across the cohort, then an LLM
+turns them into actions. The split is deliberate: detectors produce every number,
+so the LLM can only interpret measured figures rather than invent plausible ones.
+
+What the detectors look for — chosen because these are the patterns a busy
+manager rarely has time to cross-reference:
+
+| Detector | The thing you would otherwise miss |
+|---|---|
+| `release_toil` | Near-duplicate commits. Every one looks like output; only the ratio shows a quarter of someone's commits were the same chore. |
+| `review_reciprocity` | Who unblocks whom, bots excluded. Surfaces mentoring pairs and one-way relationships. |
+| `knowledge_silos` | Repos with exactly one contributor. Nobody decides to create a single point of failure; it accumulates. |
+| `review_load_balance` | Who subsidises the team's review capacity vs who consumes it. |
+| `depth_vs_volume` | Where ranking by review *count* and review *depth* disagree — i.e. where a count-only reading is most wrong. |
+| `stalled_work` | Authored volume that never shipped. Someone can produce steadily and merge nothing. |
+| `trajectory_shifts` | Big half-over-half swings. A prompt for a conversation, never a verdict. |
+| `theme_mix` | What kind of work someone actually does, from commit subjects. |
+| `external_visibility` | Merged PRs to projects your org does not control. |
+| `bus_factor` | Subsystems with one de-facto owner. |
+| `measurement_risk` | Where the data is too weak to build an insight on. |
+
+The rendered section gives each insight a **Finding**, **Why missed**, **Do
+this**, and **Unless** (what would make the reading wrong), plus suggested 1:1
+questions and an explicit *Do NOT conclude* list.
+
+### 8. Read
+
+```bash
 python3 $S/report.py --outdir $OUT --open
 ```
 
@@ -347,7 +386,7 @@ path-based classification is a heuristic and a good-faith lower bound.
 python3 tests/test_pipeline.py
 ```
 
-175 assertions, fully offline — no network, no `gh`, no pip. Exit code is
+210 assertions, fully offline — no network, no `gh`, no pip. Exit code is
 non-zero on failure so it drops into CI as-is.
 
 Every real bug found while building this has a named regression test: variable
@@ -366,7 +405,7 @@ single classifier rule makes six of them fail — including the one that reports
 | [`ETHICS.md`](ETHICS.md) | what the numbers do and don't mean |
 | [`references/classification.md`](references/classification.md) | verified pattern table, per-ecosystem gotchas, how to verify a new rule |
 | [`references/methodology.md`](references/methodology.md) | API ceilings, fork double-counting, fairness |
-| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 175 offline assertions |
+| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 210 offline assertions |
 
 ## Contributing
 
