@@ -9,7 +9,7 @@ shipped over a review period.
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Python 3](https://img.shields.io/badge/python-3.8%2B-blue)
 ![Dependencies: none](https://img.shields.io/badge/dependencies-stdlib%20only-green)
-![Tests](https://img.shields.io/badge/tests-163%20offline-brightgreen)
+![Tests](https://img.shields.io/badge/tests-175%20offline-brightgreen)
 
 ---
 
@@ -194,6 +194,20 @@ correcting.
 re-fetching means re-running `classify.py`. `build.py` stops with instructions if
 you forget.
 
+**Budget hours, not minutes.** A measured 8-person / 7-month scan made ~1,700
+unique PR lookups and took over two hours across `fetch.py` and `cache.py`. Run
+`--dry-run` first, then run the long steps in the background.
+
+**Everything is resumable.** `cache.py` flushes every 25 PRs and skips whatever
+it already has, so you can stop any time and re-run the identical command to
+continue — nothing is re-fetched and nothing is lost. It prints a live ETA.
+
+GitHub's *secondary* rate limit triggers on sustained request rate even with
+quota remaining. Transient 403/429s are retried with exponential backoff and
+search calls are paced; a hard failure raises loudly rather than recording zero,
+because "this person did nothing" is the worst possible silent error in a
+performance review.
+
 ### 3. Classify
 
 ```bash
@@ -333,7 +347,7 @@ path-based classification is a heuristic and a good-faith lower bound.
 python3 tests/test_pipeline.py
 ```
 
-163 assertions, fully offline — no network, no `gh`, no pip. Exit code is
+175 assertions, fully offline — no network, no `gh`, no pip. Exit code is
 non-zero on failure so it drops into CI as-is.
 
 Every real bug found while building this has a named regression test: variable
@@ -352,7 +366,7 @@ single classifier rule makes six of them fail — including the one that reports
 | [`ETHICS.md`](ETHICS.md) | what the numbers do and don't mean |
 | [`references/classification.md`](references/classification.md) | verified pattern table, per-ecosystem gotchas, how to verify a new rule |
 | [`references/methodology.md`](references/methodology.md) | API ceilings, fork double-counting, fairness |
-| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 163 offline assertions |
+| [`tests/test_pipeline.py`](tests/test_pipeline.py) | 175 offline assertions |
 
 ## Contributing
 

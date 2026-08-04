@@ -62,6 +62,22 @@ python3 $S/report.py    --outdir $OUT --open             # interactive HTML
 classification, so any re-fetch means re-running `classify.py` before
 `build.py`. `build.py` fails with instructions if you forget.
 
+**Budget hours, not minutes, for a real cohort.** A measured 8-person /
+7-month scan made ~1,700 unique PRs and took over two hours across `fetch.py`
+and `cache.py`. Run `--dry-run` first for an estimate, then run the long steps
+in the background.
+
+**Every step is resumable.** `cache.py` writes progress every 25 PRs and skips
+anything already cached, so stopping and re-running the identical command
+continues from where it left off. Nothing is re-fetched and nothing is lost.
+Tell the user this rather than making them wait on a foreground command.
+
+**Expect rate limiting on large scans.** GitHub's secondary limit triggers on
+sustained request rate even with quota remaining. `fetch.py` retries transient
+403/429s with backoff and paces search calls; a hard failure raises loudly
+rather than recording zero, because "this person did nothing" is the worst
+possible silent error in a performance review.
+
 Useful flags:
 
 | | |
@@ -174,7 +190,7 @@ than the individual.
 ## Tests
 
 ```bash
-python3 tests/test_pipeline.py     # 163 assertions, offline, no gh needed
+python3 tests/test_pipeline.py     # 175 assertions, offline, no gh needed
 ```
 
 Point downstream consumers at `COHORT-INDEX.yaml` first.

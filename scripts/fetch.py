@@ -23,6 +23,10 @@ import json
 import os
 import subprocess
 import sys
+import time
+
+# Search API allows 30 req/min. Pace under that so retries stay rare.
+SEARCH_PACE = float(os.environ.get("PERF_SEARCH_PACE", "2.2"))
 
 PR_JQ = ('.items[]|{number,title,state,created_at,'
          'merged_at:.pull_request.merged_at,url:.html_url,'
@@ -45,11 +49,34 @@ CMT_JQ = ('.items[]|{number,title,url:.html_url,'
 MAX_PAGES = 10
 
 
-def gh(args):
-    r = subprocess.run(["gh"] + args, capture_output=True, text=True)
-    if r.returncode != 0:
-        return ""
-    return r.stdout
+def gh(args, retries=5):
+    """Run a gh call, retrying through search rate-limit rejections.
+
+    The search API allows only 30 requests/minute and a full scan makes far more
+    than that, so transient 403/429 rejections are EXPECTED, not exceptional.
+    Returning "" on failure (the previous behaviour) made those rejections
+    indistinguishable from a genuinely empty result: total_count() saw a
+    non-numeric string and recorded 0, so a rate-limited sub-window silently
+    reported "this person did nothing" instead of failing loudly.
+    """
+    delay = 8.0
+    for attempt in range(retries):
+        r = subprocess.run(["gh"] + args, capture_output=True, text=True)
+        if r.returncode == 0:
+            return r.stdout
+        err = (r.stderr or "").lower()
+        transient = ("rate limit" in err or "429" in err or "403" in err
+                     or "secondary" in err or "abuse" in err
+                     or "timeout" in err or "502" in err or "503" in err)
+        if not transient or attempt == retries - 1:
+            raise RuntimeError(
+                "gh call failed (attempt %d/%d): %s\n  args: %s"
+                % (attempt + 1, retries, (r.stderr or "").strip()[:400],
+                   " ".join(args[:6])))
+        sys.stderr.write("    rate-limited, retrying in %.0fs\n" % delay)
+        time.sleep(delay)
+        delay *= 2
+    return ""
 
 
 def jlines(s):
@@ -67,7 +94,14 @@ def jlines(s):
 def total_count(q):
     s = gh(["api", "-X", "GET", "search/issues", "-f", "q=" + q,
             "-f", "per_page=1", "--jq", ".total_count"]).strip()
-    return int(s) if s.isdigit() else None
+    if not s.isdigit():
+        # Do NOT fall back to 0/None here: a corrupted count that looks like a
+        # real number is worse than a crash, because it lands in someone's
+        # review as "no activity".
+        raise RuntimeError("total_count returned non-numeric %r for q=%s"
+                           % (s[:120], q))
+    time.sleep(SEARCH_PACE)
+    return int(s)
 
 
 def search(q, jq, pages=MAX_PAGES):
@@ -76,6 +110,7 @@ def search(q, jq, pages=MAX_PAGES):
         got = jlines(gh(["api", "-X", "GET", "search/issues", "-f", "q=" + q,
                          "-f", "per_page=100", "-f", "page=%d" % p, "--jq", jq]))
         out += got
+        time.sleep(SEARCH_PACE)
         if len(got) < 100:
             break
     return out
@@ -155,14 +190,28 @@ def main():
         n = len(people)
         mult = 3 if a.compare_window else 1
         searches = n * 8 * mult      # 4 searches + 4 total_count probes
-        print("DRY RUN")
-        print("  people: %d" % n)
-        print("  windows per person: %d" % mult)
-        print("  search calls: ~%d (search limit is 30/min -> ~%d min minimum)"
-              % (searches, max(1, searches // 30)))
-        print("  per-PR diff-stat calls: 1 per authored PR (unknown until fetched)")
-        print("  visibility: %s" % a.visibility)
-        print("\nThen cache.py costs 1-2 more calls per unique PR.")
+        # Search pacing dominates: SEARCH_PACE between calls, plus one
+        # diff-stat call per authored PR. Measured on a real 8-person,
+        # 7-month scan: ~1,700 PRs and a bit over an hour for this step
+        # alone, so the honest estimate has to include the per-PR cost.
+        search_min = searches * SEARCH_PACE / 60.0
+        print("DRY RUN -- estimate only")
+        print("  people: %d   windows each: %d   visibility: %s"
+              % (n, mult, a.visibility))
+        print("  search calls: ~%d  ->  ~%d min just for searches"
+              % (searches, max(1, round(search_min))))
+        print()
+        print("  PLUS one diff-stat call per authored PR, which usually")
+        print("  dominates and cannot be known until the searches run.")
+        print("  Rough guide from a real run: ~200 PRs/person over 7 months")
+        print("  => ~%d PR calls => roughly %d-%d min more."
+              % (n * 200 * mult, n * 200 * mult // 60, n * 200 * mult // 25))
+        print()
+        print("  Then cache.py costs 1-4 calls per UNIQUE PR (see its own")
+        print("  output for a live ETA). For a large cohort budget HOURS,")
+        print("  not minutes, and run it in the background.")
+        print()
+        print("  Every step is resumable -- stop and re-run any time.")
         print("Re-run without --dry-run to fetch.")
         return 0
 

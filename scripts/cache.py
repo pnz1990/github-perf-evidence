@@ -30,6 +30,11 @@ import json
 import os
 import subprocess
 import sys
+import time
+
+# Flush cadence. Smaller means less lost work if the run is interrupted; the
+# write is cheap relative to an API call.
+FLUSH_EVERY = 25
 
 # Working files, not person bundles.
 SKIP_FILES = ("filecache.json", "patterns.json", "commitcache.json",
@@ -85,8 +90,16 @@ def main():
             if "%s#%d" % k not in cache
             or (a.commits and "%s#%d" % k not in ccache)
             or (a.review_depth and "%s#%d" % k not in rcache)]
-    print("unique PRs=%d cached=%d todo=%d"
-          % (len(keys), len(keys) - len(todo), len(todo)))
+    per_pr = 1 + (1 if a.commits else 0) + (2 if a.review_depth else 0)
+    print("unique PRs=%d  cached=%d  todo=%d  (~%d API calls at %d/PR)"
+          % (len(keys), len(keys) - len(todo), len(todo),
+             len(todo) * per_pr, per_pr))
+    if len(todo) > 300:
+        print("This is a long run. It is fully RESUMABLE: progress is written")
+        print("every %d PRs, so you can stop any time and re-run the same"
+              % FLUSH_EVERY)
+        print("command to continue. Nothing already cached is re-fetched.")
+    started = time.time()
 
     for i, (repo, num) in enumerate(todo, 1):
         key = "%s#%d" % (repo, num)
@@ -151,13 +164,17 @@ def main():
                     subs.append([au, msg[:160]])
             ccache[key] = subs if (subs or r2.returncode == 0) else None
 
-        if i % 50 == 0:
+        if i % FLUSH_EVERY == 0:
             json.dump(cache, open(path, "w"))
             if a.commits:
                 json.dump(ccache, open(cpath, "w"))
             if a.review_depth:
                 json.dump(rcache, open(rpath, "w"))
-            print("  %d/%d" % (i, len(todo)))
+            done = time.time() - started
+            rate = i / max(0.001, done)
+            left = (len(todo) - i) / max(0.001, rate)
+            print("  %d/%d  (%.0f%%)  ~%d min remaining"
+                  % (i, len(todo), 100.0 * i / len(todo), left / 60))
 
     json.dump(cache, open(path, "w"))
     if a.commits:

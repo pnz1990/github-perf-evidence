@@ -546,6 +546,80 @@ def test_ownership_timeout_is_bounded():
     check("ownership filters bots", bool(ownership.BOT_RE.search("ci-bot")))
 
 
+def test_fetch_retries_transient_and_fails_loud():
+    """The worst possible failure mode: a rate-limited search returning "" so
+    total_count() reads a non-numeric string and records 0. That silently reports
+    "this person did nothing" into someone's performance review.
+
+    Observed live: a full 8-person scan tripped GitHub's secondary rate limit
+    mid-run. Transient rejections are EXPECTED at this call volume, so they must
+    be retried; everything else must fail loudly rather than degrade to zero."""
+    print("\n[fetch] rate-limit retry + fail-loud (real incident)")
+    sys.path.insert(0, SCRIPTS)
+    import fetch                              # noqa: E402
+
+    class R:
+        def __init__(self, rc, out="", err=""):
+            self.returncode, self.stdout, self.stderr = rc, out, err
+
+    real_run, real_sleep = fetch.subprocess.run, fetch.time.sleep
+    try:
+        fetch.time.sleep = lambda _s: None    # keep the suite fast
+
+        calls = []
+
+        def flaky(a, **k):
+            calls.append(1)
+            if len(calls) < 3:
+                return R(1, "", "API rate limit exceeded (HTTP 403)")
+            return R(0, '{"ok":1}')
+        fetch.subprocess.run = flaky
+        got = fetch.gh(["api", "x"])
+        check("transient 403 is retried, not swallowed", '{"ok":1}' in got, got)
+        check("retried more than once", len(calls) == 3, str(len(calls)))
+
+        for err in ("secondary rate limit", "429 Too Many Requests",
+                    "abuse detection", "502 Bad Gateway", "timeout"):
+            calls[:] = []
+
+            def only_transient(a, _e=err, **k):
+                calls.append(1)
+                return (R(1, "", _e) if len(calls) < 2 else R(0, "ok"))
+            fetch.subprocess.run = only_transient
+            check("treated as transient: %s" % err,
+                  fetch.gh(["api", "x"]) == "ok")
+
+        # Permanent errors must raise, never return "".
+        for err in ("Not Found (HTTP 404)", "Bad credentials (HTTP 401)"):
+            fetch.subprocess.run = lambda a, _e=err, **k: R(1, "", _e)
+            raised = False
+            try:
+                fetch.gh(["api", "x"])
+            except RuntimeError:
+                raised = True
+            check("permanent error raises: %s" % err, raised,
+                  "returned instead of raising -- would degrade to zero")
+
+        # total_count must never coerce junk into a number.
+        fetch.subprocess.run = lambda a, **k: R(0, "not-a-number")
+        raised = False
+        try:
+            fetch.total_count("q")
+        except RuntimeError:
+            raised = True
+        check("total_count refuses non-numeric output", raised,
+              "a corrupted count silently becomes 'no activity'")
+
+        fetch.subprocess.run = lambda a, **k: R(0, "42\n")
+        eq("total_count parses a real number", fetch.total_count("q"), 42)
+    finally:
+        fetch.subprocess.run, fetch.time.sleep = real_run, real_sleep
+
+    check("search calls are paced under the 30/min ceiling",
+          fetch.SEARCH_PACE >= 2.0,
+          "pace %s would exceed the limit" % fetch.SEARCH_PACE)
+
+
 def test_no_variable_shadowing_regression():
     """A real bug: `ext` (a list of PRs) was reassigned to a file-extension
     string inside the language loop, so the external-contributions section
@@ -616,6 +690,7 @@ def main():
     for t in (test_classification, test_bot_filter,
               test_stale_pipeline_guard, test_review_depth_keys_match_report,
               test_trend_windows_do_not_overlap, test_ownership_timeout_is_bounded,
+              test_fetch_retries_transient_and_fails_loud,
               test_gh_json_type_enforcement, test_repo_meta_degrades,
               test_wrap_never_splits_words, test_yq_escaping,
               test_html_escaping, test_bar_bounds,
